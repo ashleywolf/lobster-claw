@@ -3,7 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lobster Claw</title>
+  <title>🦞 Lobster Claw</title>
+  <meta property="og:title" content="Lobster Claw - Catch lobsters with your hands or mouth!">
+  <meta property="og:description" content="A webcam-powered game where you grab lobsters using hand pinch gestures or mouth chomps. Built with MediaPipe.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ashleywolf.github.io/lobster-claw/">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
+  <meta name="theme-color" content="#020e1f">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -34,10 +40,79 @@
       opacity: 0;
       pointer-events: none;
     }
+
+    #nameEntry {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.7);
+    }
+
+    .name-entry-card {
+      background: #0a1e30;
+      border: 2px solid #1a4060;
+      border-radius: 16px;
+      padding: 24px;
+      text-align: center;
+      max-width: 320px;
+      width: 90%;
+    }
+
+    #photoPreview {
+      border-radius: 50%;
+      border: 3px solid #ff5533;
+      display: block;
+      margin: 0 auto 16px;
+    }
+
+    #nameInput {
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 20px;
+      border-radius: 8px;
+      border: 2px solid #1a4060;
+      background: #051520;
+      color: #e6fff5;
+      text-align: center;
+      outline: none;
+      font-family: inherit;
+    }
+
+    #nameInput:focus {
+      border-color: #ff5533;
+    }
+
+    #nameSubmit {
+      width: 100%;
+      padding: 14px;
+      margin-top: 12px;
+      font-size: 18px;
+      font-weight: bold;
+      border-radius: 8px;
+      border: none;
+      background: #ff5533;
+      color: white;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    #nameSubmit:hover {
+      background: #ff7744;
+    }
   </style>
 </head>
 <body>
   <video id="webcam" autoplay playsinline></video>
+  <div id="nameEntry" style="display:none;">
+    <div class="name-entry-card">
+      <canvas id="photoPreview" width="100" height="100"></canvas>
+      <input type="text" id="nameInput" maxlength="15" placeholder="Your name" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <button id="nameSubmit">SUBMIT SCORE</button>
+    </div>
+  </div>
   <canvas id="gameCanvas"></canvas>
 
   <script type="module">
@@ -50,7 +125,14 @@
     // =========================================================
     // CONFIG
     // =========================================================
+    // Create a fine-grained PAT with gist scope only, paste here
+    const GIST_TOKEN = "";
+
     const CFG = {
+      GIST_ID: "abc403f076fbff00127762acc1edc187",
+      LEADERBOARD_MAX: 50,
+      LEADERBOARD_REFRESH: 30000,
+
       baseLobstersPerSec: 0.35,
       difficultyInterval: 55000,
       difficultySpawnMult: 1.07,
@@ -343,6 +425,14 @@
       lastOctocatSpawn: 0,
       faceModelReady: false,
       handModelReady: false,
+      transition: null,
+      gameOverStartTime: 0,
+      depthUpTime: 0,
+      leaderboard: [],
+      lastLeaderboardFetch: 0,
+      playerPhoto: null,
+      submittingScore: false,
+      scoreSubmitted: false,
     };
 
     // =========================================================
@@ -1471,6 +1561,7 @@
       if (now - state.lastDifficultyUp > CFG.difficultyInterval && state.difficultyTier < CFG.maxDifficultyTier) {
         state.difficultyTier++;
         state.lastDifficultyUp = now;
+        state.depthUpTime = now;
       }
       const spawnRate = CFG.baseLobstersPerSec * Math.pow(CFG.difficultySpawnMult, state.difficultyTier);
       state.spawnAccum += dt * spawnRate;
@@ -1529,18 +1620,223 @@
       state.gameStartTime = now;
       state.lastDifficultyUp = now;
       state.lastCatchTime = 0;
+      state.transition = null;
+      state.gameOverStartTime = 0;
+      state.depthUpTime = 0;
+      state.scoreSubmitted = false;
+      state.playerPhoto = null;
+      state.submittingScore = false;
       initBubbles();
       initPlankton();
+      if (performance.now() - state.lastLeaderboardFetch > CFG.LEADERBOARD_REFRESH) {
+        fetchLeaderboard();
+      }
     }
 
     function endGame(now) {
       state.phase = "gameover";
+      state.gameOverStartTime = now;
+      const isNewRecord = state.score > state.highScore && state.score > 0;
       if (state.score > state.highScore) {
         state.highScore = state.score;
         localStorage.setItem("lobsterClaw_high", String(state.highScore));
       }
+      if (isNewRecord) {
+        for (let i = 0; i < 35; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 2 + Math.random() * 5;
+          state.particles.push({
+            x: W / 2 + (Math.random() - 0.5) * W * 0.4,
+            y: H * 0.25 + (Math.random() - 0.5) * 40,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - 2,
+            life: 0.8 + Math.random() * 0.6,
+            maxLife: 0.8 + Math.random() * 0.6,
+            r: 3 + Math.random() * 5,
+            color: "rgba(255, 215, 0,",
+          });
+        }
+      }
       audio.gameOver();
+      capturePhoto();
+      state.scoreSubmitted = false;
+      showNameEntry();
     }
+
+    // =========================================================
+    // LEADERBOARD
+    // =========================================================
+    const photoCache = new Map();
+
+    function getPhotoImage(dataUrl) {
+      if (!dataUrl) return null;
+      if (photoCache.has(dataUrl)) return photoCache.get(dataUrl);
+      const img = new Image();
+      img.src = dataUrl;
+      photoCache.set(dataUrl, img);
+      return img;
+    }
+
+    function capturePhoto() {
+      const size = 100;
+      const offscreen = document.createElement('canvas');
+      offscreen.width = size;
+      offscreen.height = size;
+      const offCtx = offscreen.getContext('2d');
+
+      let sx, sy, sSize;
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+
+      if (state.mouths.length > 0) {
+        const faceVX = (1 - state.mouths[0].x) * vw;
+        const faceVY = state.mouths[0].y * vh;
+        sSize = Math.min(vw, vh) * 0.5;
+        sx = faceVX - sSize / 2;
+        sy = faceVY - sSize / 2;
+        // Clamp to video bounds
+        sx = Math.max(0, Math.min(sx, vw - sSize));
+        sy = Math.max(0, Math.min(sy, vh - sSize));
+      } else {
+        // Center crop
+        sSize = Math.min(vw, vh);
+        sx = (vw - sSize) / 2;
+        sy = (vh - sSize) / 2;
+      }
+
+      // Draw mirrored (selfie cam)
+      offCtx.save();
+      offCtx.translate(size, 0);
+      offCtx.scale(-1, 1);
+      offCtx.drawImage(video, sx, sy, sSize, sSize, 0, 0, size, size);
+      offCtx.restore();
+
+      state.playerPhoto = offscreen.toDataURL('image/jpeg', 0.6);
+    }
+
+    async function fetchLeaderboard() {
+      try {
+        const resp = await fetch(`https://api.github.com/gists/${CFG.GIST_ID}`, {
+          headers: { 'Accept': 'application/vnd.github.v3+json' }
+        });
+        if (!resp.ok) return;
+        const gist = await resp.json();
+        const file = gist.files['leaderboard.json'];
+        if (file) {
+          state.leaderboard = JSON.parse(file.content);
+          state.lastLeaderboardFetch = performance.now();
+        }
+      } catch (e) {
+        console.warn('Failed to fetch leaderboard:', e);
+      }
+    }
+
+    async function submitScore(name, score, photo) {
+      if (!GIST_TOKEN || state.submittingScore) return false;
+      state.submittingScore = true;
+      try {
+        const resp = await fetch(`https://api.github.com/gists/${CFG.GIST_ID}`, {
+          headers: { 'Accept': 'application/vnd.github.v3+json' }
+        });
+        if (!resp.ok) { state.submittingScore = false; return false; }
+        const gist = await resp.json();
+        const file = gist.files['leaderboard.json'];
+        let entries = file ? JSON.parse(file.content) : [];
+
+        entries.push({ name, score, photo, ts: Date.now() });
+        entries.sort((a, b) => b.score - a.score);
+        entries = entries.slice(0, CFG.LEADERBOARD_MAX);
+
+        const updateResp = await fetch(`https://api.github.com/gists/${CFG.GIST_ID}`, {
+          method: 'PATCH',
+          headers: {
+            'Accept': 'application/vnd.github.v3+json',
+            'Authorization': `token ${GIST_TOKEN}`,
+          },
+          body: JSON.stringify({
+            files: { 'leaderboard.json': { content: JSON.stringify(entries) } }
+          })
+        });
+
+        if (updateResp.ok) {
+          state.leaderboard = entries;
+          state.lastLeaderboardFetch = performance.now();
+          state.submittingScore = false;
+          state.scoreSubmitted = true;
+          return true;
+        }
+        state.submittingScore = false;
+        return false;
+      } catch (e) {
+        console.warn('Failed to submit score:', e);
+        state.submittingScore = false;
+        return false;
+      }
+    }
+
+    function showNameEntry() {
+      const overlay = document.getElementById('nameEntry');
+      const input = document.getElementById('nameInput');
+      const preview = document.getElementById('photoPreview');
+      const previewCtx = preview.getContext('2d');
+
+      if (state.playerPhoto) {
+        const img = new Image();
+        img.onload = () => {
+          previewCtx.save();
+          previewCtx.beginPath();
+          previewCtx.arc(50, 50, 50, 0, Math.PI * 2);
+          previewCtx.clip();
+          previewCtx.drawImage(img, 0, 0, 100, 100);
+          previewCtx.restore();
+        };
+        img.src = state.playerPhoto;
+      }
+
+      input.value = localStorage.getItem('lobsterClaw_name') || '';
+      overlay.style.display = 'flex';
+      setTimeout(() => input.focus(), 100);
+    }
+
+    function hideNameEntry() {
+      document.getElementById('nameEntry').style.display = 'none';
+    }
+
+    async function handleNameSubmit() {
+      const input = document.getElementById('nameInput');
+      const name = input.value.trim();
+      if (!name) { input.focus(); return; }
+
+      localStorage.setItem('lobsterClaw_name', name);
+
+      const btn = document.getElementById('nameSubmit');
+      btn.textContent = 'SUBMITTING...';
+      btn.disabled = true;
+
+      const success = await submitScore(name, state.score, state.playerPhoto);
+
+      if (!success && GIST_TOKEN) {
+        btn.textContent = 'FAILED - TAP TO RETRY';
+        btn.disabled = false;
+        return;
+      }
+
+      if (!GIST_TOKEN) {
+        state.leaderboard.push({ name, score: state.score, photo: state.playerPhoto, ts: Date.now() });
+        state.leaderboard.sort((a, b) => b.score - a.score);
+        state.leaderboard = state.leaderboard.slice(0, CFG.LEADERBOARD_MAX);
+        state.scoreSubmitted = true;
+      }
+
+      hideNameEntry();
+      btn.textContent = 'SUBMIT SCORE';
+      btn.disabled = false;
+    }
+
+    document.getElementById('nameSubmit').addEventListener('click', handleNameSubmit);
+    document.getElementById('nameInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleNameSubmit();
+    });
 
     // =========================================================
     // RENDERING
@@ -1632,7 +1928,7 @@
     function drawCameraFeed() {
       if (!camReady) return;
       ctx.save();
-      ctx.globalAlpha = 0.12;
+      ctx.globalAlpha = 0.16;
       ctx.translate(W, 0);
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, W, H);
@@ -1771,7 +2067,29 @@
       }
     }
 
+    function fillRoundedRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.arcTo(x + w, y, x + w, y + r, r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+      ctx.lineTo(x + r, y + h);
+      ctx.arcTo(x, y + h, x, y + h - r, r);
+      ctx.lineTo(x, y + r);
+      ctx.arcTo(x, y, x + r, y, r);
+      ctx.closePath();
+      ctx.fill();
+    }
+
     function drawHUD(now) {
+      // Pill backgrounds
+      ctx.fillStyle = "rgba(0, 10, 20, 0.3)";
+      fillRoundedRect(ctx, 10, 8, 155, 62, 10);
+      const livesWidth = CFG.lives * 27 + 30;
+      ctx.fillStyle = "rgba(0, 10, 20, 0.3)";
+      fillRoundedRect(ctx, W - livesWidth - 10, 8, livesWidth, 62, 10);
+
       ctx.shadowColor = "rgba(0,0,0,0.5)";
       ctx.shadowBlur = 4;
       ctx.fillStyle = "#e6fff5";
@@ -1840,6 +2158,27 @@
         ctx.fillText(flashText, state.catchFlash.x, state.catchFlash.y - yOff);
         ctx.restore();
       }
+
+      // Depth-up notification
+      if (state.depthUpTime && now - state.depthUpTime < 2000) {
+        const depthElapsed = now - state.depthUpTime;
+        let depthAlpha;
+        if (depthElapsed < 300) depthAlpha = depthElapsed / 300;
+        else if (depthElapsed < 1500) depthAlpha = 1;
+        else depthAlpha = 1 - (depthElapsed - 1500) / 500;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, depthAlpha);
+        ctx.textAlign = "center";
+        ctx.font = "bold 36px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.shadowColor = "rgba(74, 200, 255, 0.5)";
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = "#4ac8ff";
+        ctx.fillText(`DEPTH ${state.difficultyTier + 1}`, W / 2, H * 0.15);
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
     }
@@ -1849,89 +2188,195 @@
       drawBubbles();
       drawPlankton();
 
-      // Demo lobsters
-      ctx.save();
-      ctx.globalAlpha = 0.4;
       const demoTime = time / 1000;
-      const demo1 = new Lobster(1);
-      demo1.x = W * 0.3 + Math.sin(demoTime * 0.5) * 80;
-      demo1.y = H * 0.35;
-      demo1.legPhase = demoTime * 5;
-      demo1.clawPhase = demoTime * 2;
-      demo1.facingLeft = false;
-      demo1.draw(ctx);
+      const faceOK = state.faceModelReady;
+      const handOK = state.handModelReady;
+      const anyReady = faceOK || handOK;
 
-      const demo2 = new Lobster(0);
-      demo2.x = W * 0.7 + Math.sin(demoTime * 0.7 + 1) * 60;
-      demo2.y = H * 0.55;
-      demo2.legPhase = demoTime * 6;
-      demo2.clawPhase = demoTime * 2.5;
-      demo2.facingLeft = true;
-      demo2.draw(ctx);
+      // Demo lobsters swimming in natural loops
+      ctx.save();
+      ctx.globalAlpha = 0.6;
 
-      const demo3 = new Lobster(2);
-      demo3.x = W * 0.5 + Math.sin(demoTime * 0.4 + 2) * 70;
-      demo3.y = H * 0.7;
-      demo3.legPhase = demoTime * 4;
-      demo3.clawPhase = demoTime * 1.8;
-      demo3.facingLeft = false;
-      demo3.draw(ctx);
+      // Demo 1 (regular) - figure-8 orbit center-left
+      const d1 = new Lobster(1);
+      d1.x = W * 0.35 + Math.sin(demoTime * 0.6) * W * 0.12;
+      d1.y = H * 0.42 + Math.sin(demoTime * 1.2) * H * 0.06;
+      d1.legPhase = demoTime * 5;
+      d1.clawPhase = demoTime * 2;
+      d1.facingLeft = Math.cos(demoTime * 0.6) < 0;
+      d1.draw(ctx);
+
+      // Demo 2 (baby) - circular orbit center-right, faster
+      const d2 = new Lobster(0);
+      d2.x = W * 0.65 + Math.cos(demoTime * 0.9) * W * 0.08;
+      d2.y = H * 0.48 + Math.sin(demoTime * 0.9) * H * 0.05;
+      d2.legPhase = demoTime * 7;
+      d2.clawPhase = demoTime * 3;
+      d2.facingLeft = -Math.sin(demoTime * 0.9) < 0;
+      d2.draw(ctx);
+
+      // Demo 3 (king) - slow majestic sweep across bottom third
+      const d3 = new Lobster(2);
+      d3.x = W * 0.5 + Math.sin(demoTime * 0.3) * W * 0.3;
+      d3.y = H * 0.72 + Math.sin(demoTime * 0.6) * H * 0.03;
+      d3.legPhase = demoTime * 3;
+      d3.clawPhase = demoTime * 1.5;
+      d3.facingLeft = Math.cos(demoTime * 0.3) < 0;
+      d3.draw(ctx);
+
       ctx.restore();
 
-      // Title
+      // Animated title with warm glow
+      const titleBob = Math.sin(demoTime * 2) * 4;
+      ctx.save();
       ctx.textAlign = "center";
-      ctx.fillStyle = "#ff6644";
-      ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText("\u{1F99E} Lobster Claw", W / 2, H * 0.22);
+      ctx.shadowColor = "rgba(255, 100, 50, 0.6)";
+      ctx.shadowBlur = 20;
+      ctx.fillStyle = "#ff5533";
 
-      // Subtitle
-      ctx.font = "20px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillStyle = "#8b9e94";
-      ctx.fillText("Grab lobsters with your hands or your mouth!", W / 2, H * 0.28);
+      // Lobster emoji to the left of title
+      ctx.font = "44px sans-serif";
+      ctx.fillText("\u{1F99E}", W / 2 - 165, H * 0.18 + titleBob);
 
-      // Status
-      ctx.font = "18px -apple-system, BlinkMacSystemFont, sans-serif";
-      if (!camReady) {
-        ctx.fillStyle = "#f0883e";
-        ctx.fillText("Waiting for camera access...", W / 2, H * 0.50);
-      } else {
-        const faceOK = state.faceModelReady;
-        const handOK = state.handModelReady;
-        const anyReady = faceOK || handOK;
+      // "LOBSTER" smaller above
+      ctx.font = "bold 30px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("LOBSTER", W / 2 + 10, H * 0.14 + titleBob);
 
-        if (!anyReady) {
-          ctx.fillStyle = "#f0883e";
-          ctx.fillText("Loading tracking models...", W / 2, H * 0.50);
-        } else {
-          // Show what's available
-          ctx.fillStyle = "#39d353";
-          ctx.fillText("Camera ready!", W / 2, H * 0.46);
+      // "CLAW" large below
+      ctx.font = "bold 60px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("CLAW", W / 2 + 10, H * 0.22 + titleBob);
 
-          ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
-          ctx.fillStyle = faceOK ? "#39d353" : "#f0883e";
-          ctx.fillText(faceOK ? "\u2713 Mouth tracking loaded" : "\u2717 Mouth tracking unavailable", W / 2, H * 0.52);
-          ctx.fillStyle = handOK ? "#39d353" : "#f0883e";
-          ctx.fillText(handOK ? "\u2713 Hand tracking loaded" : "\u2717 Hand tracking unavailable", W / 2, H * 0.57);
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.restore();
 
-          ctx.fillStyle = "#8b9e94";
-          ctx.font = "15px -apple-system, BlinkMacSystemFont, sans-serif";
-          if (handOK) ctx.fillText("\u{1F90F} Pinch your fingers to GRAB", W / 2, H * 0.64);
-          if (faceOK) ctx.fillText("\u{1F444} Open your mouth to CHOMP", W / 2, H * 0.68);
-          ctx.fillText("Don't let them escape! You have 8 lives.", W / 2, H * 0.73);
+      // Loading states
+      if (!camReady || !anyReady) {
+        // Loading animation: baby lobster orbiting a small circle
+        const loadLob = new Lobster(0);
+        const loadAngle = demoTime * 2;
+        loadLob.x = W / 2 + Math.cos(loadAngle) * 25;
+        loadLob.y = H * 0.38 + Math.sin(loadAngle) * 25;
+        loadLob.legPhase = demoTime * 8;
+        loadLob.clawPhase = demoTime * 3;
+        loadLob.facingLeft = Math.sin(loadAngle) > 0;
+        ctx.save();
+        ctx.globalAlpha = 0.7;
+        loadLob.draw(ctx);
+        ctx.restore();
 
-          const pulse = 0.7 + Math.sin(demoTime * 3) * 0.3;
-          ctx.globalAlpha = pulse;
-          ctx.fillStyle = "#39d353";
-          ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
-          ctx.fillText("Click or tap to start", W / 2, H * 0.82);
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      if (state.highScore > 0) {
+        ctx.textAlign = "center";
         ctx.fillStyle = "#8b9e94";
         ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillText(`High score: ${state.highScore}`, W / 2, H * 0.92);
+        let loadMsg = "Preparing camera...";
+        if (camReady && !handOK && !faceOK) loadMsg = "Loading hand tracking...";
+        else if (camReady && handOK && !faceOK) loadMsg = "Loading face tracking...";
+        else if (camReady && !handOK && faceOK) loadMsg = "Loading hand tracking...";
+        ctx.fillText(loadMsg, W / 2, H * 0.46);
+        return;
+      }
+
+      // Instruction cards
+      const cardW = 140;
+      const cardH = 100;
+      const cardY = H * 0.32;
+      const cardGap = 24;
+      const cards = [];
+      if (handOK) cards.push({ icon: "\u{1F90F}", label: "PINCH to grab" });
+      if (faceOK) cards.push({ icon: "\u{1F444}", label: "CHOMP to catch" });
+
+      const totalCardsW = cards.length * cardW + (cards.length - 1) * cardGap;
+      const cardsStartX = (W - totalCardsW) / 2;
+
+      ctx.textAlign = "center";
+      for (let ci = 0; ci < cards.length; ci++) {
+        const cx = cardsStartX + ci * (cardW + cardGap);
+        ctx.fillStyle = "rgba(0, 10, 20, 0.4)";
+        fillRoundedRect(ctx, cx, cardY, cardW, cardH, 12);
+        ctx.font = "36px sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(cards[ci].icon, cx + cardW / 2, cardY + 44);
+        ctx.font = "bold 13px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillStyle = "#c0d8d0";
+        ctx.fillText(cards[ci].label, cx + cardW / 2, cardY + cardH - 14);
+      }
+
+      // Reminder
+      ctx.fillStyle = "#8b9e94";
+      ctx.font = "15px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Don't let them escape! You have 8 lives.", W / 2, cardY + cardH + 32);
+
+      // Start prompt
+      const pulse = 0.7 + Math.sin(demoTime * 3) * 0.3;
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = "#39d353";
+      ctx.font = "bold 26px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("TAP TO DIVE IN!", W / 2, cardY + cardH + 72);
+      ctx.restore();
+
+      // Top 3 leaderboard
+      if (state.leaderboard.length > 0) {
+        const lbY = cardY + cardH + 100;
+        ctx.save();
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = "#8b9e94";
+        ctx.font = "bold 13px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("TOP 3", W / 2, lbY);
+
+        const top3 = state.leaderboard.slice(0, 3);
+        for (let i = 0; i < top3.length; i++) {
+          const entry = top3[i];
+          const rowY = lbY + 18 + i * 42;
+          const rowCenterX = W / 2;
+
+          // Circular photo
+          const photoImg = getPhotoImage(entry.photo);
+          if (photoImg && photoImg.complete && photoImg.naturalWidth > 0) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(rowCenterX - 80, rowY + 8, 18, 0, Math.PI * 2);
+            ctx.clip();
+            ctx.drawImage(photoImg, rowCenterX - 98, rowY - 10, 36, 36);
+            ctx.restore();
+          }
+
+          // Rank
+          ctx.fillStyle = i === 0 ? "#ffd700" : i === 1 ? "#c0c0c0" : "#cd7f32";
+          ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "right";
+          ctx.fillText(`${i + 1}.`, rowCenterX - 104, rowY + 13);
+
+          // Name
+          ctx.fillStyle = "#c0d8d0";
+          ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText(entry.name, rowCenterX - 56, rowY + 13);
+
+          // Score
+          ctx.fillStyle = "#8b9e94";
+          ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "right";
+          ctx.fillText(String(entry.score), rowCenterX + 100, rowY + 13);
+        }
+        ctx.restore();
+      }
+
+      // High score badge
+      if (state.highScore > 0) {
+        const badgeW = 160;
+        const badgeH = 32;
+        const badgeX = (W - badgeW) / 2;
+        const badgeY = H * 0.90 - badgeH / 2;
+        ctx.fillStyle = "rgba(255, 215, 0, 0.15)";
+        fillRoundedRect(ctx, badgeX, badgeY, badgeW, badgeH, 16);
+        ctx.fillStyle = "#ffd700";
+        ctx.font = "bold 15px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`\u{1F3C6} Best: ${state.highScore}`, W / 2, H * 0.90 + 5);
       }
     }
 
@@ -1940,41 +2385,210 @@
       drawBubbles();
       drawPlankton();
 
-      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      // Animated dark overlay
+      const elapsed = now - state.gameOverStartTime;
+      const overlayAlpha = Math.min(0.6, elapsed / 500 * 0.6);
+      ctx.fillStyle = `rgba(0, 0, 0, ${overlayAlpha})`;
       ctx.fillRect(0, 0, W, H);
+
+      // Escaped lobsters swimming away in background
+      const escTime = elapsed / 1000;
+      const esc1 = new Lobster(1);
+      esc1.x = W * 0.3 - escTime * 40;
+      esc1.y = H * 0.45 + Math.sin(escTime * 2) * 20;
+      esc1.facingLeft = true;
+      esc1.legPhase = escTime * 6;
+      esc1.clawPhase = escTime * 2;
+      esc1.draw(ctx);
+
+      const esc2 = new Lobster(0);
+      esc2.x = W * 0.7 + escTime * 50;
+      esc2.y = H * 0.6 + Math.sin(escTime * 2.5 + 1) * 15;
+      esc2.facingLeft = false;
+      esc2.legPhase = escTime * 7;
+      esc2.clawPhase = escTime * 2.5;
+      esc2.draw(ctx);
+
+      drawParticles();
 
       ctx.textAlign = "center";
 
-      ctx.fillStyle = "#f85149";
-      ctx.font = "bold 48px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText("They Got Away!", W / 2, H * 0.3);
-
-      ctx.fillStyle = "#e6fff5";
-      ctx.font = "bold 36px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText(`Score: ${state.score}`, W / 2, H * 0.42);
-
-      const isNew = state.score >= state.highScore && state.score > 0;
-      if (isNew) {
-        ctx.fillStyle = "#39d353";
-        ctx.font = "bold 22px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillText("New high score!", W / 2, H * 0.50);
-      } else {
-        ctx.fillStyle = "#8b9e94";
-        ctx.font = "18px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillText(`Best: ${state.highScore}`, W / 2, H * 0.50);
+      // "THEY ESCAPED!" - immediate, scale-in
+      if (elapsed > 0) {
+        const titleScale = Math.min(1, elapsed / 300);
+        ctx.save();
+        ctx.translate(W / 2, H * 0.28);
+        ctx.scale(titleScale, titleScale);
+        ctx.shadowColor = "rgba(248, 81, 73, 0.4)";
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = "#f85149";
+        ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText("THEY ESCAPED!", 0, 0);
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.restore();
       }
 
-      ctx.fillStyle = "#8b9e94";
-      ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
-      const duration = Math.floor((now - state.gameStartTime) / 1000);
-      ctx.fillText(`Survived ${duration} seconds  |  Reached depth ${state.difficultyTier + 1}`, W / 2, H * 0.58);
+      // Score - appears after 300ms, slides up
+      if (elapsed > 300) {
+        const scoreProgress = Math.min(1, (elapsed - 300) / 300);
+        const slideUp = (1 - scoreProgress) * 30;
+        ctx.save();
+        ctx.globalAlpha = scoreProgress;
+        ctx.fillStyle = "#e6fff5";
+        ctx.font = "bold 38px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText(`Score: ${state.score}`, W / 2, H * 0.42 + slideUp);
+        ctx.restore();
+      }
 
-      const pulse = 0.7 + Math.sin(now / 1000 * 3) * 0.3;
-      ctx.globalAlpha = pulse;
-      ctx.fillStyle = "#39d353";
-      ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText("Click or tap to play again", W / 2, H * 0.72);
-      ctx.globalAlpha = 1;
+      // High score / New record - appears after 500ms
+      if (elapsed > 500) {
+        const hsProgress = Math.min(1, (elapsed - 500) / 300);
+        ctx.save();
+        ctx.globalAlpha = hsProgress;
+        const isNew = state.score >= state.highScore && state.score > 0;
+        if (isNew) {
+          ctx.shadowColor = "rgba(255, 215, 0, 0.4)";
+          ctx.shadowBlur = 10;
+          ctx.fillStyle = "#ffd700";
+          ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText("\u{1F3C6} New Record!", W / 2, H * 0.50);
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+        } else {
+          ctx.fillStyle = "#8b9e94";
+          ctx.font = "18px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText(`Best: ${state.highScore}`, W / 2, H * 0.50);
+        }
+        ctx.restore();
+      }
+
+      // Stats - appears after 700ms
+      if (elapsed > 700) {
+        const statsProgress = Math.min(1, (elapsed - 700) / 300);
+        ctx.save();
+        ctx.globalAlpha = statsProgress;
+        ctx.fillStyle = "#8b9e94";
+        ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
+        const duration = Math.floor((now - state.gameStartTime) / 1000);
+        ctx.fillText(`Survived ${duration} seconds  |  Reached depth ${state.difficultyTier + 1}`, W / 2, H * 0.58);
+        ctx.restore();
+      }
+
+      // Leaderboard - appears after 900ms
+      if (elapsed > 900 && state.scoreSubmitted && state.leaderboard.length > 0) {
+        const lbProgress = Math.min(1, (elapsed - 900) / 400);
+        ctx.save();
+        ctx.globalAlpha = lbProgress;
+
+        const lbStartY = H * 0.62;
+        ctx.fillStyle = "#8b9e94";
+        ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("LEADERBOARD", W / 2, lbStartY);
+
+        const playerName = localStorage.getItem('lobsterClaw_name') || '';
+        const top5 = state.leaderboard.slice(0, 5);
+        let playerInTop5 = false;
+        const rowH = 36;
+
+        for (let i = 0; i < top5.length; i++) {
+          const entry = top5[i];
+          const rowY = lbStartY + 12 + i * rowH;
+          const isPlayer = entry.name === playerName;
+          if (isPlayer) playerInTop5 = true;
+
+          // Highlight current player
+          if (isPlayer) {
+            ctx.fillStyle = "rgba(255, 85, 51, 0.15)";
+            fillRoundedRect(ctx, W / 2 - 130, rowY - 4, 260, rowH - 4, 6);
+          }
+
+          // Photo circle
+          const photoImg = getPhotoImage(entry.photo);
+          if (photoImg && photoImg.complete && photoImg.naturalWidth > 0) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(W / 2 - 80, rowY + 12, 12, 0, Math.PI * 2);
+            ctx.clip();
+            ctx.drawImage(photoImg, W / 2 - 92, rowY, 24, 24);
+            ctx.restore();
+          }
+
+          // Rank
+          ctx.fillStyle = i === 0 ? "#ffd700" : i === 1 ? "#c0c0c0" : i === 2 ? "#cd7f32" : "#8b9e94";
+          ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "right";
+          ctx.fillText(`${i + 1}.`, W / 2 - 98, rowY + 17);
+
+          // Name
+          ctx.fillStyle = isPlayer ? "#ff5533" : "#c0d8d0";
+          ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText(entry.name, W / 2 - 62, rowY + 17);
+
+          // Score
+          ctx.fillStyle = isPlayer ? "#ff5533" : "#8b9e94";
+          ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "right";
+          ctx.fillText(String(entry.score), W / 2 + 120, rowY + 17);
+        }
+
+        // Show player's rank if not in top 5
+        if (!playerInTop5 && playerName) {
+          const playerIdx = state.leaderboard.findIndex(e => e.name === playerName);
+          if (playerIdx >= 0) {
+            const dotsY = lbStartY + 12 + top5.length * rowH;
+            ctx.fillStyle = "#8b9e94";
+            ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("...", W / 2, dotsY + 8);
+
+            const pEntry = state.leaderboard[playerIdx];
+            const pRowY = dotsY + 18;
+
+            ctx.fillStyle = "rgba(255, 85, 51, 0.15)";
+            fillRoundedRect(ctx, W / 2 - 130, pRowY - 4, 260, rowH - 4, 6);
+
+            const pPhotoImg = getPhotoImage(pEntry.photo);
+            if (pPhotoImg && pPhotoImg.complete && pPhotoImg.naturalWidth > 0) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(W / 2 - 80, pRowY + 12, 12, 0, Math.PI * 2);
+              ctx.clip();
+              ctx.drawImage(pPhotoImg, W / 2 - 92, pRowY, 24, 24);
+              ctx.restore();
+            }
+
+            ctx.fillStyle = "#ff5533";
+            ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(`${playerIdx + 1}.`, W / 2 - 98, pRowY + 17);
+
+            ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.textAlign = "left";
+            ctx.fillText(pEntry.name, W / 2 - 62, pRowY + 17);
+
+            ctx.font = "bold 14px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(String(pEntry.score), W / 2 + 120, pRowY + 17);
+          }
+        }
+
+        ctx.restore();
+      }
+
+      // Play again - appears after 1200ms
+      if (elapsed > 1200) {
+        const tapProgress = Math.min(1, (elapsed - 1200) / 300);
+        const pulse = 0.7 + Math.sin(now / 1000 * 3) * 0.3;
+        ctx.save();
+        ctx.globalAlpha = tapProgress * pulse;
+        ctx.fillStyle = "#39d353";
+        ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText("Tap to play again", W / 2, H * 0.95);
+        ctx.restore();
+      }
     }
 
     // =========================================================
@@ -2040,6 +2654,25 @@
         drawGameOverScreen(now);
       }
 
+      // Transition overlay
+      if (state.transition) {
+        const tr = state.transition;
+        const progress = Math.min(1, (now - tr.startTime) / tr.duration);
+        if (progress >= 0.5 && state.phase === tr.from) {
+          state.phase = tr.to;
+          if (tr.to === "playing") startGame(now);
+        }
+        let overlayAlpha;
+        if (progress < 0.5) {
+          overlayAlpha = (progress / 0.5);
+        } else {
+          overlayAlpha = (1 - progress) / 0.5;
+        }
+        ctx.fillStyle = `rgba(0, 0, 0, ${overlayAlpha})`;
+        ctx.fillRect(0, 0, W, H);
+        if (progress >= 1) state.transition = null;
+      }
+
       ctx.restore();
     }
 
@@ -2048,11 +2681,13 @@
     // =========================================================
     canvas.addEventListener("click", () => {
       audio.init();
+      if (state.transition) return;
       const anyModel = state.faceModelReady || state.handModelReady;
       if (state.phase === "start" && camReady && anyModel) {
-        startGame(performance.now());
+        state.transition = { from: "start", to: "playing", startTime: performance.now(), duration: 600 };
       } else if (state.phase === "gameover") {
-        startGame(performance.now());
+        if (document.getElementById('nameEntry').style.display !== 'none') return;
+        state.transition = { from: "gameover", to: "playing", startTime: performance.now(), duration: 600 };
       }
     });
 
@@ -2060,11 +2695,13 @@
       if (e.code === "Space") {
         e.preventDefault();
         audio.init();
+        if (state.transition) return;
         const anyModel = state.faceModelReady || state.handModelReady;
         if (state.phase === "start" && camReady && anyModel) {
-          startGame(performance.now());
+          state.transition = { from: "start", to: "playing", startTime: performance.now(), duration: 600 };
         } else if (state.phase === "gameover") {
-          startGame(performance.now());
+          if (document.getElementById('nameEntry').style.display !== 'none') return;
+          state.transition = { from: "gameover", to: "playing", startTime: performance.now(), duration: 600 };
         }
       }
     });
@@ -2077,6 +2714,7 @@
       initPlankton();
       initSeaweed();
       initFloorDecorations();
+      fetchLeaderboard();
       await Promise.all([initWebcam(), initMediaPipe()]);
     }
 
