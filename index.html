@@ -1,0 +1,1507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lobster Claw</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #021a0e;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: none;
+    }
+
+    video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <video id="webcam" autoplay playsinline></video>
+  <canvas id="gameCanvas"></canvas>
+
+  <script type="module">
+    import {
+      FaceLandmarker,
+      HandLandmarker,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs";
+
+    // =========================================================
+    // CONFIG
+    // =========================================================
+    const CFG = {
+      baseLobstersPerSec: 0.35,
+      difficultyInterval: 55000,
+      difficultySpawnMult: 1.07,
+      difficultySpeedMult: 1.04,
+      maxDifficultyTier: 6,
+
+      lobsterTypes: [
+        { name: "baby",    bodyColor: "#e87040", clawColor: "#d45a2a", shellColor: "#c44a1a", eyeColor: "#fff", size: 65,  speed: [1.2, 2.2], points: 1, weight: 5 },
+        { name: "regular", bodyColor: "#cc2222", clawColor: "#aa1111", shellColor: "#991010", eyeColor: "#fff", size: 100, speed: [0.8, 1.5], points: 2, weight: 3 },
+        { name: "king",    bodyColor: "#8b0000", clawColor: "#6b0000", shellColor: "#550000", eyeColor: "#ffd700", size: 140, speed: [0.5, 1.0], points: 5, weight: 1 },
+      ],
+
+      lives: 8,
+      mouthOpenThreshold: 0.3,
+      catchRadiusMouth: 110,
+      catchRadiusHand: 100,
+      pinchThreshold: 0.08,
+      chompCooldown: 300,
+      grabCooldown: 300,
+
+      bubbleCount: 30,
+
+      UPPER_LIP: 13,
+      LOWER_LIP: 14,
+      NOSE_TIP: 1,
+
+      THUMB_TIP: 4,
+      INDEX_TIP: 8,
+      MIDDLE_TIP: 12,
+      WRIST: 0,
+      INDEX_MCP: 5,
+    };
+
+    // =========================================================
+    // AUDIO ENGINE
+    // =========================================================
+    class AudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.ready = false;
+      }
+
+      init() {
+        if (this.ready) return;
+        try {
+          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          this.ready = true;
+        } catch (e) {
+          console.warn("Web Audio not available:", e);
+        }
+      }
+
+      _noise(duration, volume = 0.3) {
+        if (!this.ready) return;
+        const sr = this.ctx.sampleRate;
+        const len = sr * duration;
+        const buf = this.ctx.createBuffer(1, len, sr);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) {
+          data[i] = (Math.random() * 2 - 1) * volume * (1 - i / len);
+        }
+        return buf;
+      }
+
+      splash() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const buf = this._noise(0.25, 0.4);
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.setValueAtTime(800, now);
+        bp.frequency.exponentialRampToValueAtTime(200, now + 0.25);
+        bp.Q.value = 1.5;
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        src.connect(bp).connect(gain).connect(this.ctx.destination);
+        src.start(now);
+        src.stop(now + 0.25);
+      }
+
+      grab() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        // Mechanical clank
+        const osc = this.ctx.createOscillator();
+        osc.type = "square";
+        osc.frequency.setValueAtTime(180, now);
+        osc.frequency.exponentialRampToValueAtTime(60, now + 0.08);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.12);
+        // Metallic click
+        const click = this.ctx.createOscillator();
+        click.type = "triangle";
+        click.frequency.setValueAtTime(1200, now);
+        click.frequency.exponentialRampToValueAtTime(400, now + 0.05);
+        const cg = this.ctx.createGain();
+        cg.gain.setValueAtTime(0.15, now);
+        cg.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+        click.connect(cg).connect(this.ctx.destination);
+        click.start(now);
+        click.stop(now + 0.06);
+      }
+
+      chomp() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        osc.type = "square";
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.exponentialRampToValueAtTime(80, now + 0.12);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.15);
+        const click = this.ctx.createOscillator();
+        click.type = "sine";
+        click.frequency.setValueAtTime(600, now);
+        const cg = this.ctx.createGain();
+        cg.gain.setValueAtTime(0.2, now);
+        cg.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+        click.connect(cg).connect(this.ctx.destination);
+        click.start(now);
+        click.stop(now + 0.04);
+      }
+
+      catchSuccess() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        [523, 659, 784].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          const g = this.ctx.createGain();
+          g.gain.setValueAtTime(0.12, now + i * 0.06);
+          g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.06 + 0.15);
+          osc.connect(g).connect(this.ctx.destination);
+          osc.start(now + i * 0.06);
+          osc.stop(now + i * 0.06 + 0.16);
+        });
+      }
+
+      fail() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(200, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.4);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.4);
+      }
+
+      gameOver() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        [200, 180, 150, 100].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          osc.type = "triangle";
+          osc.frequency.value = freq;
+          const g = this.ctx.createGain();
+          g.gain.setValueAtTime(0.25, now + i * 0.18);
+          g.gain.exponentialRampToValueAtTime(0.01, now + i * 0.18 + 0.18);
+          osc.connect(g).connect(this.ctx.destination);
+          osc.start(now + i * 0.18);
+          osc.stop(now + i * 0.18 + 0.2);
+        });
+      }
+
+      pop() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(400, now + 0.06);
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0.15, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+        osc.connect(g).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.07);
+      }
+    }
+
+    const audio = new AudioEngine();
+
+    // =========================================================
+    // STATE
+    // =========================================================
+    const state = {
+      phase: "start",
+      score: 0,
+      lives: CFG.lives,
+      highScore: parseInt(localStorage.getItem("lobsterClaw_high") || "0"),
+      lobsters: [],
+      bubbles: [],
+      particles: [],
+      seaweed: [],
+      mouths: [],
+      hands: [],
+      difficultyTier: 0,
+      lastDifficultyUp: 0,
+      spawnAccum: 0,
+      gameStartTime: 0,
+      catchFlash: null,
+      combo: 0,
+      lastCatchTime: 0,
+      shakeUntil: 0,
+      faceModelReady: false,
+      handModelReady: false,
+    };
+
+    // =========================================================
+    // CANVAS + VIDEO
+    // =========================================================
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const video = document.getElementById("webcam");
+
+    let W, H;
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
+      initSeaweed();
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    // =========================================================
+    // MEDIAPIPE
+    // =========================================================
+    let faceLandmarker = null;
+    let handLandmarker = null;
+    let camReady = false;
+    let lastFaceDetection = 0;
+    let lastHandDetection = 0;
+    const FACE_INTERVAL = 60;
+    const HAND_INTERVAL = 60;
+
+    async function initMediaPipe() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm"
+        );
+
+        // Load face and hand models in parallel
+        const [face, hand] = await Promise.allSettled([
+          FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+              delegate: "GPU",
+            },
+            outputFaceBlendshapes: true,
+            outputFacialTransformationMatrixes: false,
+            runningMode: "VIDEO",
+            numFaces: 4,
+          }),
+          HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+              delegate: "GPU",
+            },
+            runningMode: "VIDEO",
+            numHands: 4,
+          }),
+        ]);
+
+        if (face.status === "fulfilled") {
+          faceLandmarker = face.value;
+          state.faceModelReady = true;
+        } else {
+          console.warn("Face model failed (GPU), trying CPU...");
+          try {
+            faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                delegate: "CPU",
+              },
+              outputFaceBlendshapes: true,
+              runningMode: "VIDEO",
+              numFaces: 4,
+            });
+            state.faceModelReady = true;
+          } catch (e2) { console.error("Face model CPU fallback failed:", e2); }
+        }
+
+        if (hand.status === "fulfilled") {
+          handLandmarker = hand.value;
+          state.handModelReady = true;
+        } else {
+          console.warn("Hand model failed (GPU), trying CPU...");
+          try {
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "CPU",
+              },
+              runningMode: "VIDEO",
+              numHands: 4,
+            });
+            state.handModelReady = true;
+          } catch (e2) { console.error("Hand model CPU fallback failed:", e2); }
+        }
+      } catch (e) {
+        console.error("MediaPipe init failed:", e);
+      }
+    }
+
+    // =========================================================
+    // WEBCAM
+    // =========================================================
+    async function initWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await new Promise(r => { video.onloadedmetadata = r; });
+        await video.play();
+        camReady = true;
+      } catch (e) {
+        console.error("Webcam access failed:", e);
+      }
+    }
+
+    // =========================================================
+    // FACE DETECTION (multi-face)
+    // =========================================================
+    function detectFaces(now) {
+      if (!state.faceModelReady || !camReady) return;
+      if (now - lastFaceDetection < FACE_INTERVAL) return;
+      lastFaceDetection = now;
+
+      const results = faceLandmarker.detectForVideo(video, now);
+      if (!results || !results.faceLandmarks || results.faceLandmarks.length === 0) {
+        state.mouths = [];
+        return;
+      }
+
+      const prevMouths = state.mouths;
+      const newMouths = [];
+
+      for (let fi = 0; fi < results.faceLandmarks.length; fi++) {
+        const lm = results.faceLandmarks[fi];
+        const upperLip = lm[CFG.UPPER_LIP];
+        const lowerLip = lm[CFG.LOWER_LIP];
+        const mouthX = 1 - (upperLip.x + lowerLip.x) / 2;
+        const mouthY = (upperLip.y + lowerLip.y) / 2;
+
+        let jawOpen = 0;
+        if (results.faceBlendshapes && results.faceBlendshapes[fi]) {
+          for (const bs of results.faceBlendshapes[fi].categories) {
+            if (bs.categoryName === "jawOpen") { jawOpen = bs.score; break; }
+          }
+        }
+
+        const isOpen = jawOpen > CFG.mouthOpenThreshold;
+
+        let lastChompTime = 0;
+        let wasMouthOpen = false;
+        let bestDist = Infinity;
+        for (const pm of prevMouths) {
+          const d = (mouthX - pm.x) ** 2 + (mouthY - pm.y) ** 2;
+          if (d < bestDist) { bestDist = d; lastChompTime = pm.lastChompTime; wasMouthOpen = pm.mouthOpen; }
+        }
+
+        const mouth = { x: mouthX, y: mouthY, jawOpenVal: jawOpen, mouthOpen: isOpen, lastChompTime };
+
+        if (isOpen && !wasMouthOpen && state.phase === "playing") {
+          if (now - mouth.lastChompTime > CFG.chompCooldown) {
+            mouth.lastChompTime = now;
+            attemptCatch(mouthX * W, mouthY * H, now, "mouth");
+          }
+        }
+
+        newMouths.push(mouth);
+      }
+
+      state.mouths = newMouths;
+    }
+
+    // =========================================================
+    // HAND DETECTION (multi-hand, pinch = grab)
+    // =========================================================
+    function detectHands(now) {
+      if (!state.handModelReady || !camReady) return;
+      if (now - lastHandDetection < HAND_INTERVAL) return;
+      lastHandDetection = now;
+
+      const results = handLandmarker.detectForVideo(video, now);
+      if (!results || !results.landmarks || results.landmarks.length === 0) {
+        state.hands = [];
+        return;
+      }
+
+      const prevHands = state.hands;
+      const newHands = [];
+
+      for (let hi = 0; hi < results.landmarks.length; hi++) {
+        const lm = results.landmarks[hi];
+
+        // Hand center (average of wrist and middle finger MCP)
+        const wrist = lm[CFG.WRIST];
+        const mcp = lm[CFG.INDEX_MCP];
+        const handX = 1 - (wrist.x + mcp.x) / 2;
+        const handY = (wrist.y + mcp.y) / 2;
+
+        // Pinch detection: distance between thumb tip and index tip
+        const thumb = lm[CFG.THUMB_TIP];
+        const index = lm[CFG.INDEX_TIP];
+        const pinchDist = Math.sqrt((thumb.x - index.x) ** 2 + (thumb.y - index.y) ** 2);
+        const isPinching = pinchDist < CFG.pinchThreshold;
+
+        // Pinch center (for catch position)
+        const pinchX = 1 - (thumb.x + index.x) / 2;
+        const pinchY = (thumb.y + index.y) / 2;
+
+        // All fingertip positions (for claw drawing)
+        const tips = [4, 8, 12, 16, 20].map(i => ({
+          x: 1 - lm[i].x,
+          y: lm[i].y
+        }));
+
+        // Match to previous hand to carry over lastGrabTime
+        let lastGrabTime = 0;
+        let wasPinching = false;
+        let bestDist = Infinity;
+        for (const ph of prevHands) {
+          const d = (handX - ph.x) ** 2 + (handY - ph.y) ** 2;
+          if (d < bestDist) { bestDist = d; lastGrabTime = ph.lastGrabTime; wasPinching = ph.isPinching; }
+        }
+
+        const hand = { x: handX, y: handY, pinchX, pinchY, pinchDist, isPinching, lastGrabTime, tips };
+
+        // Trigger catch on pinch transition (open -> closed)
+        if (isPinching && !wasPinching && state.phase === "playing") {
+          if (now - hand.lastGrabTime > CFG.grabCooldown) {
+            hand.lastGrabTime = now;
+            attemptCatch(pinchX * W, pinchY * H, now, "hand");
+          }
+        }
+
+        newHands.push(hand);
+      }
+
+      state.hands = newHands;
+    }
+
+    // =========================================================
+    // LOBSTER CLASS
+    // =========================================================
+    class Lobster {
+      constructor(tier) {
+        const type = CFG.lobsterTypes[tier];
+        this.type = type;
+        this.size = type.size;
+        this.points = type.points;
+        this.caught = false;
+        this.offscreen = false;
+
+        const speedMult = Math.pow(CFG.difficultySpeedMult, state.difficultyTier);
+        const baseSpeed = type.speed[0] + Math.random() * (type.speed[1] - type.speed[0]);
+        this.speed = baseSpeed * speedMult;
+
+        this._spawnFromEdge();
+
+        this.legPhase = Math.random() * Math.PI * 2;
+        this.legSpeed = 5 + Math.random() * 3;
+        this.clawPhase = Math.random() * Math.PI * 2;
+        this.wanderPhase = Math.random() * Math.PI * 2;
+        this.wanderAmp = 0.3 + Math.random() * 0.5;
+        this.antennaPhase = Math.random() * Math.PI * 2;
+      }
+
+      _spawnFromEdge() {
+        const edge = Math.floor(Math.random() * 4);
+        const margin = this.size;
+        switch (edge) {
+          case 0:
+            this.x = -margin;
+            this.y = margin + Math.random() * (H - margin * 2);
+            this.angle = -Math.PI / 4 + Math.random() * Math.PI / 2;
+            break;
+          case 1:
+            this.x = W + margin;
+            this.y = margin + Math.random() * (H - margin * 2);
+            this.angle = Math.PI / 2 + Math.random() * Math.PI / 2 + Math.PI / 4;
+            break;
+          case 2:
+            this.x = margin + Math.random() * (W - margin * 2);
+            this.y = -margin;
+            this.angle = Math.PI / 4 + Math.random() * Math.PI / 2;
+            break;
+          case 3:
+            this.x = margin + Math.random() * (W - margin * 2);
+            this.y = H + margin;
+            this.angle = -(Math.PI / 4 + Math.random() * Math.PI / 2);
+            break;
+        }
+        this.facingLeft = Math.cos(this.angle) < 0;
+      }
+
+      update(dt) {
+        this.wanderPhase += dt * 1.2;
+        const wander = Math.sin(this.wanderPhase) * this.wanderAmp * dt;
+        const moveAngle = this.angle + wander;
+        this.x += Math.cos(moveAngle) * this.speed;
+        this.y += Math.sin(moveAngle) * this.speed;
+        this.legPhase += dt * this.legSpeed;
+        this.clawPhase += dt * 2;
+        this.antennaPhase += dt * 1.5;
+
+        const m = this.size * 3;
+        if (this.x < -m || this.x > W + m || this.y < -m || this.y > H + m) {
+          this.offscreen = true;
+        }
+      }
+
+      draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+
+        const dir = this.facingLeft ? -1 : 1;
+        ctx.scale(dir, 1);
+
+        const s = this.size;
+        const legWag = Math.sin(this.legPhase) * 0.15;
+        const clawOpen = Math.sin(this.clawPhase) * 0.12 + 0.2;
+        const antWag = Math.sin(this.antennaPhase) * 0.2;
+
+        // Tail fan
+        ctx.fillStyle = this.type.shellColor;
+        const tailX = -s * 0.55;
+        for (let i = -2; i <= 2; i++) {
+          ctx.beginPath();
+          const fanAngle = i * 0.25;
+          const tx = tailX - s * 0.2;
+          const ty = i * s * 0.08;
+          ctx.ellipse(tx, ty, s * 0.15, s * 0.05, fanAngle, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // Tail center piece
+        ctx.fillStyle = this.type.bodyColor;
+        ctx.beginPath();
+        ctx.ellipse(tailX, 0, s * 0.12, s * 0.1, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Body segments (3 overlapping ovals)
+        for (let i = 2; i >= 0; i--) {
+          const bx = -s * 0.25 + i * s * 0.2;
+          const sw = s * (0.18 + i * 0.02);
+          const sh = s * (0.2 - i * 0.015);
+          ctx.fillStyle = i % 2 === 0 ? this.type.bodyColor : this.type.shellColor;
+          ctx.beginPath();
+          ctx.ellipse(bx, 0, sw, sh, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Segment line
+          ctx.strokeStyle = "rgba(0,0,0,0.15)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(bx, 0, sw, sh, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // Head
+        ctx.fillStyle = this.type.bodyColor;
+        ctx.beginPath();
+        ctx.ellipse(s * 0.22, 0, s * 0.18, s * 0.2, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Legs (4 pairs, animated)
+        ctx.strokeStyle = this.type.clawColor;
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 4; i++) {
+          const lx = -s * 0.2 + i * s * 0.12;
+          const phase = this.legPhase + i * 0.8;
+          const ly1 = s * 0.18 + Math.sin(phase) * s * 0.06;
+          const ly2 = -s * 0.18 - Math.sin(phase + Math.PI) * s * 0.06;
+          ctx.beginPath();
+          ctx.moveTo(lx, s * 0.12);
+          ctx.lineTo(lx - s * 0.04, ly1);
+          ctx.lineTo(lx + s * 0.02, ly1 + s * 0.06);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(lx, -s * 0.12);
+          ctx.lineTo(lx - s * 0.04, ly2);
+          ctx.lineTo(lx + s * 0.02, ly2 - s * 0.06);
+          ctx.stroke();
+        }
+
+        // Claws (two big pincers at the front)
+        this._drawClaw(ctx, s, s * 0.32, -s * 0.22, clawOpen, -1);
+        this._drawClaw(ctx, s, s * 0.32, s * 0.22, clawOpen, 1);
+
+        // Antennae
+        ctx.strokeStyle = this.type.clawColor;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(s * 0.35, -s * 0.1);
+        ctx.quadraticCurveTo(s * 0.5, -s * 0.3 + antWag * s * 0.15, s * 0.7, -s * 0.35 + antWag * s * 0.2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(s * 0.35, s * 0.1);
+        ctx.quadraticCurveTo(s * 0.5, s * 0.3 - antWag * s * 0.15, s * 0.7, s * 0.35 - antWag * s * 0.2);
+        ctx.stroke();
+
+        // Eyes on stalks
+        ctx.strokeStyle = this.type.bodyColor;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(s * 0.3, -s * 0.12);
+        ctx.lineTo(s * 0.38, -s * 0.2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(s * 0.3, s * 0.12);
+        ctx.lineTo(s * 0.38, s * 0.2);
+        ctx.stroke();
+
+        // Eye balls
+        ctx.fillStyle = this.type.eyeColor;
+        ctx.beginPath();
+        ctx.arc(s * 0.38, -s * 0.2, s * 0.04, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(s * 0.38, s * 0.2, s * 0.04, 0, Math.PI * 2);
+        ctx.fill();
+        // Pupils
+        ctx.fillStyle = "#111";
+        ctx.beginPath();
+        ctx.arc(s * 0.39, -s * 0.2, s * 0.02, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(s * 0.39, s * 0.2, s * 0.02, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Crown for king lobster
+        if (this.type.name === "king") {
+          ctx.fillStyle = "#ffd700";
+          const crownX = s * 0.22;
+          const crownY = -s * 0.24;
+          ctx.beginPath();
+          ctx.moveTo(crownX - s * 0.1, crownY);
+          ctx.lineTo(crownX - s * 0.08, crownY - s * 0.12);
+          ctx.lineTo(crownX - s * 0.03, crownY - s * 0.06);
+          ctx.lineTo(crownX, crownY - s * 0.14);
+          ctx.lineTo(crownX + s * 0.03, crownY - s * 0.06);
+          ctx.lineTo(crownX + s * 0.08, crownY - s * 0.12);
+          ctx.lineTo(crownX + s * 0.1, crownY);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // Belly highlight
+        ctx.fillStyle = "rgba(255,200,180,0.15)";
+        ctx.beginPath();
+        ctx.ellipse(0, s * 0.05, s * 0.35, s * 0.08, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      _drawClaw(ctx, s, cx, cy, openness, side) {
+        ctx.save();
+        ctx.translate(cx, cy);
+
+        const armLen = s * 0.2;
+        const clawLen = s * 0.15;
+        const openAngle = openness * side;
+
+        // Arm
+        ctx.fillStyle = this.type.clawColor;
+        ctx.beginPath();
+        ctx.ellipse(armLen * 0.5, 0, armLen * 0.55, s * 0.04, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Upper pincer
+        ctx.save();
+        ctx.translate(armLen, 0);
+        ctx.rotate(-openAngle);
+        ctx.fillStyle = this.type.clawColor;
+        ctx.beginPath();
+        ctx.moveTo(0, -s * 0.02);
+        ctx.lineTo(clawLen, -s * 0.01);
+        ctx.quadraticCurveTo(clawLen + s * 0.04, 0, clawLen, s * 0.01);
+        ctx.lineTo(0, s * 0.02);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // Lower pincer
+        ctx.save();
+        ctx.translate(armLen, 0);
+        ctx.rotate(openAngle);
+        ctx.fillStyle = this.type.clawColor;
+        ctx.beginPath();
+        ctx.moveTo(0, s * 0.02);
+        ctx.lineTo(clawLen, s * 0.01);
+        ctx.quadraticCurveTo(clawLen + s * 0.04, 0, clawLen, -s * 0.01);
+        ctx.lineTo(0, -s * 0.02);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        ctx.restore();
+      }
+
+      hitTest(px, py, radius) {
+        const dx = px - this.x;
+        const dy = py - this.y;
+        const hitRadius = this.size * 0.5 + radius * 0.3;
+        return dx * dx + dy * dy < hitRadius * hitRadius;
+      }
+    }
+
+    // =========================================================
+    // BUBBLES
+    // =========================================================
+    function initBubbles() {
+      state.bubbles = [];
+      for (let i = 0; i < CFG.bubbleCount; i++) {
+        state.bubbles.push(makeBubble(true));
+      }
+    }
+
+    function makeBubble(randomY = false) {
+      return {
+        x: Math.random() * W,
+        y: randomY ? Math.random() * H : H + Math.random() * 50,
+        r: 2 + Math.random() * 6,
+        speed: 0.3 + Math.random() * 0.8,
+        wobblePhase: Math.random() * Math.PI * 2,
+        wobbleSpeed: 1 + Math.random() * 2,
+        opacity: 0.1 + Math.random() * 0.2,
+      };
+    }
+
+    function updateBubbles(dt) {
+      for (const b of state.bubbles) {
+        b.y -= b.speed;
+        b.wobblePhase += dt * b.wobbleSpeed;
+        b.x += Math.sin(b.wobblePhase) * 0.3;
+        if (b.y < -b.r * 2) Object.assign(b, makeBubble(false));
+      }
+    }
+
+    function drawBubbles() {
+      for (const b of state.bubbles) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(150, 230, 200, ${b.opacity})`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(b.x - b.r * 0.25, b.y - b.r * 0.25, b.r * 0.3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${b.opacity * 0.8})`;
+        ctx.fill();
+      }
+    }
+
+    // =========================================================
+    // SEAWEED (decorative bottom)
+    // =========================================================
+    function initSeaweed() {
+      state.seaweed = [];
+      const count = Math.floor(W / 80);
+      for (let i = 0; i < count; i++) {
+        state.seaweed.push({
+          x: 40 + i * (W / count) + (Math.random() - 0.5) * 40,
+          h: 40 + Math.random() * 80,
+          phase: Math.random() * Math.PI * 2,
+          speed: 0.8 + Math.random() * 1.2,
+          hue: 100 + Math.random() * 40,
+        });
+      }
+    }
+
+    function drawSeaweed(time) {
+      for (const sw of state.seaweed) {
+        const sway = Math.sin(time * 0.001 * sw.speed + sw.phase) * 15;
+        ctx.strokeStyle = `hsla(${sw.hue}, 60%, 30%, 0.6)`;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(sw.x, H);
+        ctx.quadraticCurveTo(sw.x + sway, H - sw.h * 0.6, sw.x + sway * 0.5, H - sw.h);
+        ctx.stroke();
+        // Leaf
+        ctx.fillStyle = `hsla(${sw.hue}, 50%, 35%, 0.4)`;
+        ctx.beginPath();
+        ctx.ellipse(sw.x + sway * 0.3, H - sw.h * 0.5, 8, 3, sway * 0.02, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // =========================================================
+    // CATCH PARTICLES
+    // =========================================================
+    function spawnCatchParticles(x, y, success, type) {
+      const count = success ? 18 : 8;
+      const color = success
+        ? (type === "hand" ? "rgba(255, 180, 50," : "rgba(57, 211, 83,")
+        : "rgba(150, 220, 200,";
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 5;
+        state.particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 0.4 + Math.random() * 0.4,
+          maxLife: 0.4 + Math.random() * 0.4,
+          r: 3 + Math.random() * 5,
+          color,
+        });
+      }
+    }
+
+    function updateParticles(dt) {
+      for (let i = state.particles.length - 1; i >= 0; i--) {
+        const p = state.particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.15;
+        p.life -= dt;
+        if (p.life <= 0) state.particles.splice(i, 1);
+      }
+    }
+
+    function drawParticles() {
+      for (const p of state.particles) {
+        const alpha = Math.max(0, p.life / p.maxLife);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * alpha, 0, Math.PI * 2);
+        ctx.fillStyle = p.color + alpha.toFixed(2) + ")";
+        ctx.fill();
+      }
+    }
+
+    // =========================================================
+    // CATCH LOGIC
+    // =========================================================
+    function attemptCatch(hx, hy, now, method) {
+      let caught = false;
+      const radius = method === "hand" ? CFG.catchRadiusHand : CFG.catchRadiusMouth;
+
+      if (method === "hand") { audio.grab(); } else { audio.splash(); }
+      spawnCatchParticles(hx, hy, false, method);
+
+      for (let i = state.lobsters.length - 1; i >= 0; i--) {
+        const lob = state.lobsters[i];
+        if (lob.caught) continue;
+        if (lob.hitTest(hx, hy, radius)) {
+          lob.caught = true;
+          caught = true;
+
+          if (now - state.lastCatchTime < 2000) { state.combo++; } else { state.combo = 1; }
+          state.lastCatchTime = now;
+
+          const comboMult = Math.min(state.combo, 5);
+          const pts = lob.points * comboMult;
+          state.score += pts;
+
+          state.catchFlash = { x: lob.x, y: lob.y, time: now, points: pts, combo: state.combo, method };
+
+          audio.catchSuccess();
+          spawnCatchParticles(lob.x, lob.y, true, method);
+          state.lobsters.splice(i, 1);
+          break;
+        }
+      }
+
+      if (!caught) { audio.pop(); }
+    }
+
+    // =========================================================
+    // SPAWNING
+    // =========================================================
+    function pickLobsterType() {
+      const totalWeight = CFG.lobsterTypes.reduce((s, t) => s + t.weight, 0);
+      let r = Math.random() * totalWeight;
+      for (let i = 0; i < CFG.lobsterTypes.length; i++) {
+        r -= CFG.lobsterTypes[i].weight;
+        if (r <= 0) return i;
+      }
+      return 0;
+    }
+
+    function updateSpawning(dt, now) {
+      if (now - state.lastDifficultyUp > CFG.difficultyInterval && state.difficultyTier < CFG.maxDifficultyTier) {
+        state.difficultyTier++;
+        state.lastDifficultyUp = now;
+      }
+      const spawnRate = CFG.baseLobstersPerSec * Math.pow(CFG.difficultySpawnMult, state.difficultyTier);
+      state.spawnAccum += dt * spawnRate;
+      while (state.spawnAccum >= 1) {
+        state.spawnAccum -= 1;
+        state.lobsters.push(new Lobster(pickLobsterType()));
+      }
+    }
+
+    // =========================================================
+    // GAME LOGIC
+    // =========================================================
+    function updateGame(dt, now) {
+      updateSpawning(dt, now);
+
+      for (let i = state.lobsters.length - 1; i >= 0; i--) {
+        const lob = state.lobsters[i];
+        lob.update(dt);
+        if (lob.offscreen && !lob.caught) {
+          state.lobsters.splice(i, 1);
+          state.lives--;
+          state.shakeUntil = now + 300;
+          audio.fail();
+          if (state.lives <= 0) { endGame(now); return; }
+        }
+      }
+
+      updateBubbles(dt);
+      updateParticles(dt);
+    }
+
+    function startGame(now) {
+      audio.init();
+      state.phase = "playing";
+      state.score = 0;
+      state.lives = CFG.lives;
+      state.lobsters = [];
+      state.particles = [];
+      state.combo = 0;
+      state.mouths = [];
+      state.hands = [];
+      state.difficultyTier = 0;
+      state.spawnAccum = 0;
+      state.catchFlash = null;
+      state.gameStartTime = now;
+      state.lastDifficultyUp = now;
+      state.lastCatchTime = 0;
+      initBubbles();
+    }
+
+    function endGame(now) {
+      state.phase = "gameover";
+      if (state.score > state.highScore) {
+        state.highScore = state.score;
+        localStorage.setItem("lobsterClaw_high", String(state.highScore));
+      }
+      audio.gameOver();
+    }
+
+    // =========================================================
+    // RENDERING
+    // =========================================================
+    function drawTankBackground(time) {
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, "#042a1a");
+      grad.addColorStop(0.3, "#063a28");
+      grad.addColorStop(0.7, "#084a32");
+      grad.addColorStop(1, "#0a3828");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+
+      // Sandy bottom
+      const sandGrad = ctx.createLinearGradient(0, H - 60, 0, H);
+      sandGrad.addColorStop(0, "rgba(194, 170, 120, 0)");
+      sandGrad.addColorStop(0.3, "rgba(194, 170, 120, 0.15)");
+      sandGrad.addColorStop(1, "rgba(194, 170, 120, 0.25)");
+      ctx.fillStyle = sandGrad;
+      ctx.fillRect(0, H - 60, W, 60);
+
+      // Subtle light rays
+      ctx.save();
+      ctx.globalAlpha = 0.04;
+      for (let i = 0; i < 5; i++) {
+        const x = W * (0.15 + i * 0.18);
+        ctx.beginPath();
+        ctx.moveTo(x - 30, 0);
+        ctx.lineTo(x + 60, H);
+        ctx.lineTo(x - 60, H);
+        ctx.closePath();
+        ctx.fillStyle = "#4af7a0";
+        ctx.fill();
+      }
+      ctx.restore();
+
+      drawSeaweed(time);
+
+      // Tank edge glow (glass reflection)
+      ctx.save();
+      ctx.globalAlpha = 0.06;
+      const edgeW = 40;
+      const leftGrad = ctx.createLinearGradient(0, 0, edgeW, 0);
+      leftGrad.addColorStop(0, "#fff");
+      leftGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = leftGrad;
+      ctx.fillRect(0, 0, edgeW, H);
+      const rightGrad = ctx.createLinearGradient(W, 0, W - edgeW, 0);
+      rightGrad.addColorStop(0, "#fff");
+      rightGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = rightGrad;
+      ctx.fillRect(W - edgeW, 0, edgeW, H);
+      ctx.restore();
+    }
+
+    function drawCameraFeed() {
+      if (!camReady) return;
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      ctx.translate(W, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, W, H);
+      ctx.restore();
+    }
+
+    function drawMouthIndicators(now) {
+      if (state.mouths.length === 0) return;
+
+      const colors = [
+        { open: "57, 211, 83", closed: "150, 220, 200" },
+        { open: "255, 150, 50", closed: "255, 200, 120" },
+        { open: "200, 100, 255", closed: "180, 150, 255" },
+        { open: "255, 100, 150", closed: "255, 180, 200" },
+      ];
+
+      for (let mi = 0; mi < state.mouths.length; mi++) {
+        const mouth = state.mouths[mi];
+        const col = colors[mi % colors.length];
+        const hx = mouth.x * W;
+        const hy = mouth.y * H;
+        const openness = mouth.jawOpenVal;
+        const baseRadius = CFG.catchRadiusMouth * 0.5;
+        const radius = baseRadius + openness * CFG.catchRadiusMouth * 0.8;
+        const isOpen = mouth.mouthOpen;
+
+        ctx.beginPath();
+        ctx.arc(hx, hy, radius + 10, 0, Math.PI * 2);
+        ctx.fillStyle = isOpen ? `rgba(${col.open}, 0.15)` : `rgba(${col.closed}, 0.08)`;
+        ctx.fill();
+
+        const mouthWidth = radius * 1.3;
+        const mouthHeight = radius * (0.4 + openness * 1.2);
+
+        ctx.beginPath();
+        ctx.ellipse(hx, hy, mouthWidth, mouthHeight, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = isOpen ? `rgba(${col.open}, 0.6)` : `rgba(${col.closed}, 0.3)`;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        if (openness > 0.2) {
+          const alpha = Math.min(1, (openness - 0.2) * 2);
+          ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.7})`;
+          const teethCount = 6;
+          for (let i = 0; i < teethCount; i++) {
+            const t = (i + 0.5) / teethCount;
+            const angle = -Math.PI * 0.8 + t * Math.PI * 1.6;
+            const tx = hx + Math.cos(angle) * mouthWidth * 0.85;
+            const ty = hy + Math.sin(angle) * mouthHeight * 0.85;
+            ctx.beginPath();
+            ctx.moveTo(tx - 4, ty);
+            ctx.lineTo(tx, ty + 8);
+            ctx.lineTo(tx + 4, ty);
+            ctx.closePath();
+            ctx.fill();
+            const bAngle = Math.PI * 0.8 - t * Math.PI * 1.6;
+            const bx = hx + Math.cos(bAngle) * mouthWidth * 0.85;
+            const by = hy + Math.sin(bAngle) * mouthHeight * 0.85;
+            ctx.beginPath();
+            ctx.moveTo(bx - 4, by);
+            ctx.lineTo(bx, by - 8);
+            ctx.lineTo(bx + 4, by);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+
+        if (isOpen) {
+          ctx.beginPath();
+          ctx.arc(hx, hy, radius * 0.2, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${col.open}, 0.4)`;
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawClawIndicators(now) {
+      if (state.hands.length === 0) return;
+
+      const clawColors = [
+        { grip: "#ffb832", idle: "#8899aa" },
+        { grip: "#ff6644", idle: "#99aabb" },
+        { grip: "#44ddff", idle: "#aabbcc" },
+        { grip: "#ff44aa", idle: "#bbaacc" },
+      ];
+
+      for (let hi = 0; hi < state.hands.length; hi++) {
+        const hand = state.hands[hi];
+        const col = clawColors[hi % clawColors.length];
+        const hx = hand.x * W;
+        const hy = hand.y * H;
+        const px = hand.pinchX * W;
+        const py = hand.pinchY * H;
+        const grabbing = hand.isPinching;
+        const mainColor = grabbing ? col.grip : col.idle;
+        const alpha = grabbing ? 0.8 : 0.5;
+
+        // Claw machine arm (line from top to hand)
+        ctx.strokeStyle = `rgba(120, 130, 140, ${alpha * 0.3})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(hx, 0);
+        ctx.lineTo(hx, hy - 30);
+        ctx.stroke();
+
+        // Claw mechanism housing
+        ctx.fillStyle = `rgba(80, 90, 100, ${alpha * 0.6})`;
+        ctx.beginPath();
+        ctx.roundRect(hx - 18, hy - 35, 36, 20, 4);
+        ctx.fill();
+
+        // Three claw prongs
+        const openAngle = grabbing ? 0.1 : 0.5;
+        const prongLen = 35 + (grabbing ? 5 : 0);
+
+        ctx.strokeStyle = mainColor;
+        ctx.lineWidth = 4;
+        ctx.lineCap = "round";
+
+        // Center prong
+        ctx.beginPath();
+        ctx.moveTo(hx, hy - 15);
+        ctx.lineTo(hx, hy - 15 + prongLen);
+        ctx.stroke();
+
+        // Left prong
+        ctx.beginPath();
+        ctx.moveTo(hx - 8, hy - 15);
+        ctx.lineTo(hx - 8 - Math.sin(openAngle) * prongLen, hy - 15 + Math.cos(openAngle) * prongLen);
+        ctx.stroke();
+
+        // Right prong
+        ctx.beginPath();
+        ctx.moveTo(hx + 8, hy - 15);
+        ctx.lineTo(hx + 8 + Math.sin(openAngle) * prongLen, hy - 15 + Math.cos(openAngle) * prongLen);
+        ctx.stroke();
+
+        // Prong tips (rounded)
+        const tipR = grabbing ? 4 : 3;
+        ctx.fillStyle = mainColor;
+        ctx.beginPath();
+        ctx.arc(hx, hy - 15 + prongLen, tipR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(hx - 8 - Math.sin(openAngle) * prongLen, hy - 15 + Math.cos(openAngle) * prongLen, tipR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(hx + 8 + Math.sin(openAngle) * prongLen, hy - 15 + Math.cos(openAngle) * prongLen, tipR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Grab flash
+        if (grabbing) {
+          ctx.beginPath();
+          ctx.arc(px, py, CFG.catchRadiusHand * 0.4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 184, 50, 0.2)`;
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(px, py, CFG.catchRadiusHand * 0.25, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 184, 50, 0.35)`;
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawHUD(now) {
+      ctx.fillStyle = "#e6fff5";
+      ctx.font = "bold 28px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(`Score: ${state.score}`, 20, 40);
+
+      ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillStyle = "#8b9e94";
+      ctx.fillText(`Best: ${state.highScore}`, 20, 62);
+
+      // Lives (lobster emoji)
+      ctx.textAlign = "right";
+      ctx.font = "26px sans-serif";
+      let livesStr = "";
+      for (let i = 0; i < CFG.lives; i++) {
+        livesStr += i < state.lives ? "\u{1F99E}" : "\u{1F480}";
+      }
+      ctx.fillText(livesStr, W - 20, 40);
+
+      ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillStyle = "#8b9e94";
+      ctx.textAlign = "right";
+      const elapsed = Math.floor((now - state.gameStartTime) / 1000);
+      ctx.fillText(`Depth: ${state.difficultyTier + 1}  |  ${elapsed}s`, W - 20, 62);
+
+      // Tracking status indicators
+      ctx.textAlign = "left";
+      ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
+      const faceActive = state.mouths.length > 0;
+      const handActive = state.hands.length > 0;
+      ctx.fillStyle = faceActive ? "rgba(57,211,83,0.7)" : "rgba(139,158,148,0.4)";
+      ctx.fillText(faceActive ? "\u{1F444} Mouth active" : "\u{1F444} No face", 20, H - 16);
+      ctx.fillStyle = handActive ? "rgba(255,184,50,0.7)" : "rgba(139,158,148,0.4)";
+      ctx.fillText(handActive ? "\u{270B} Hand active" : "\u{270B} No hand", 140, H - 16);
+
+      // Combo
+      if (state.combo > 1 && now - state.lastCatchTime < 2000) {
+        ctx.textAlign = "center";
+        ctx.font = "bold 22px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillStyle = "#39d353";
+        ctx.fillText(`${state.combo}x COMBO`, W / 2, 40);
+      }
+
+      // Catch flash
+      if (state.catchFlash && now - state.catchFlash.time < 1000) {
+        const t = (now - state.catchFlash.time) / 1000;
+        const alpha = 1 - t;
+        const yOff = t * 60;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = "center";
+        ctx.font = "bold 32px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillStyle = state.catchFlash.method === "hand" ? "#ffb832" : "#39d353";
+        const label = state.catchFlash.method === "hand" ? "GRAB!" : "CHOMP!";
+        ctx.fillText(`+${state.catchFlash.points} ${label}`, state.catchFlash.x, state.catchFlash.y - yOff);
+        ctx.restore();
+      }
+    }
+
+    function drawStartScreen(time) {
+      drawTankBackground(time);
+      drawBubbles();
+
+      // Demo lobsters
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      const demoTime = time / 1000;
+      const demo1 = new Lobster(1);
+      demo1.x = W * 0.3 + Math.sin(demoTime * 0.5) * 80;
+      demo1.y = H * 0.35;
+      demo1.legPhase = demoTime * 5;
+      demo1.clawPhase = demoTime * 2;
+      demo1.facingLeft = false;
+      demo1.draw(ctx);
+
+      const demo2 = new Lobster(0);
+      demo2.x = W * 0.7 + Math.sin(demoTime * 0.7 + 1) * 60;
+      demo2.y = H * 0.55;
+      demo2.legPhase = demoTime * 6;
+      demo2.clawPhase = demoTime * 2.5;
+      demo2.facingLeft = true;
+      demo2.draw(ctx);
+      ctx.restore();
+
+      // Title
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff6644";
+      ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("\u{1F99E} Lobster Claw", W / 2, H * 0.22);
+
+      // Subtitle
+      ctx.font = "20px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillStyle = "#8b9e94";
+      ctx.fillText("Grab lobsters with your hands or your mouth!", W / 2, H * 0.28);
+
+      // Status
+      ctx.font = "18px -apple-system, BlinkMacSystemFont, sans-serif";
+      if (!camReady) {
+        ctx.fillStyle = "#f0883e";
+        ctx.fillText("Waiting for camera access...", W / 2, H * 0.50);
+      } else {
+        const faceOK = state.faceModelReady;
+        const handOK = state.handModelReady;
+        const anyReady = faceOK || handOK;
+
+        if (!anyReady) {
+          ctx.fillStyle = "#f0883e";
+          ctx.fillText("Loading tracking models...", W / 2, H * 0.50);
+        } else {
+          // Show what's available
+          ctx.fillStyle = "#39d353";
+          ctx.fillText("Camera ready!", W / 2, H * 0.46);
+
+          ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillStyle = faceOK ? "#39d353" : "#f0883e";
+          ctx.fillText(faceOK ? "\u2713 Mouth tracking loaded" : "\u2717 Mouth tracking unavailable", W / 2, H * 0.52);
+          ctx.fillStyle = handOK ? "#39d353" : "#f0883e";
+          ctx.fillText(handOK ? "\u2713 Hand tracking loaded" : "\u2717 Hand tracking unavailable", W / 2, H * 0.57);
+
+          ctx.fillStyle = "#8b9e94";
+          ctx.font = "15px -apple-system, BlinkMacSystemFont, sans-serif";
+          if (handOK) ctx.fillText("\u{1F90F} Pinch your fingers to GRAB", W / 2, H * 0.64);
+          if (faceOK) ctx.fillText("\u{1F444} Open your mouth to CHOMP", W / 2, H * 0.68);
+          ctx.fillText("Don't let them escape! You have 8 lives.", W / 2, H * 0.73);
+
+          const pulse = 0.7 + Math.sin(demoTime * 3) * 0.3;
+          ctx.globalAlpha = pulse;
+          ctx.fillStyle = "#39d353";
+          ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText("Click or tap to start", W / 2, H * 0.82);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      if (state.highScore > 0) {
+        ctx.fillStyle = "#8b9e94";
+        ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText(`High score: ${state.highScore}`, W / 2, H * 0.92);
+      }
+    }
+
+    function drawGameOverScreen(now) {
+      drawTankBackground(now);
+      drawBubbles();
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.textAlign = "center";
+
+      ctx.fillStyle = "#f85149";
+      ctx.font = "bold 48px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("They Got Away!", W / 2, H * 0.3);
+
+      ctx.fillStyle = "#e6fff5";
+      ctx.font = "bold 36px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText(`Score: ${state.score}`, W / 2, H * 0.42);
+
+      const isNew = state.score >= state.highScore && state.score > 0;
+      if (isNew) {
+        ctx.fillStyle = "#39d353";
+        ctx.font = "bold 22px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText("New high score!", W / 2, H * 0.50);
+      } else {
+        ctx.fillStyle = "#8b9e94";
+        ctx.font = "18px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText(`Best: ${state.highScore}`, W / 2, H * 0.50);
+      }
+
+      ctx.fillStyle = "#8b9e94";
+      ctx.font = "16px -apple-system, BlinkMacSystemFont, sans-serif";
+      const duration = Math.floor((now - state.gameStartTime) / 1000);
+      ctx.fillText(`Survived ${duration} seconds  |  Reached depth ${state.difficultyTier + 1}`, W / 2, H * 0.58);
+
+      const pulse = 0.7 + Math.sin(now / 1000 * 3) * 0.3;
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = "#39d353";
+      ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("Click or tap to play again", W / 2, H * 0.72);
+      ctx.globalAlpha = 1;
+    }
+
+    // =========================================================
+    // MAIN LOOP
+    // =========================================================
+    let lastTime = 0;
+
+    function loop(timestamp) {
+      requestAnimationFrame(loop);
+
+      const now = timestamp || performance.now();
+      const rawDt = lastTime ? (now - lastTime) / 1000 : 0.016;
+      const dt = Math.min(rawDt, 0.1);
+      lastTime = now;
+
+      let shakeX = 0, shakeY = 0;
+      if (now < state.shakeUntil) {
+        shakeX = (Math.random() - 0.5) * 8;
+        shakeY = (Math.random() - 0.5) * 8;
+      }
+
+      ctx.save();
+      ctx.translate(shakeX, shakeY);
+
+      // Run detections (staggered for perf)
+      detectFaces(now);
+      detectHands(now);
+
+      if (state.phase === "start") {
+        updateBubbles(dt);
+        drawStartScreen(now);
+      } else if (state.phase === "playing") {
+        updateGame(dt, now);
+        drawTankBackground(now);
+        drawCameraFeed();
+        drawBubbles();
+        for (const lob of state.lobsters) { lob.draw(ctx); }
+        drawParticles();
+        drawClawIndicators(now);
+        drawMouthIndicators(now);
+        drawHUD(now);
+      } else if (state.phase === "gameover") {
+        updateBubbles(dt);
+        updateParticles(dt);
+        drawGameOverScreen(now);
+      }
+
+      ctx.restore();
+    }
+
+    // =========================================================
+    // INPUT
+    // =========================================================
+    canvas.addEventListener("click", () => {
+      audio.init();
+      const anyModel = state.faceModelReady || state.handModelReady;
+      if (state.phase === "start" && camReady && anyModel) {
+        startGame(performance.now());
+      } else if (state.phase === "gameover") {
+        startGame(performance.now());
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.code === "Space") {
+        e.preventDefault();
+        audio.init();
+        const anyModel = state.faceModelReady || state.handModelReady;
+        if (state.phase === "start" && camReady && anyModel) {
+          startGame(performance.now());
+        } else if (state.phase === "gameover") {
+          startGame(performance.now());
+        }
+      }
+    });
+
+    // =========================================================
+    // INIT
+    // =========================================================
+    async function init() {
+      initBubbles();
+      initSeaweed();
+      await Promise.all([initWebcam(), initMediaPipe()]);
+    }
+
+    init();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
