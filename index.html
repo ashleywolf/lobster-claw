@@ -94,6 +94,13 @@
 
       bubbleCount: 30,
 
+      // Octocat easter egg
+      octocatSpawnMin: 75000,
+      octocatSpawnMax: 105000,
+      octocatSize: 55,
+      octocatSpeed: 0.6,
+      octocatFreezeDuration: 3000,
+
       UPPER_LIP: 13,
       LOWER_LIP: 14,
       NOSE_TIP: 1,
@@ -158,7 +165,7 @@
       grab() {
         if (!this.ready) return;
         const now = this.ctx.currentTime;
-        // Mechanical clank
+        // Snap
         const osc = this.ctx.createOscillator();
         osc.type = "square";
         osc.frequency.setValueAtTime(180, now);
@@ -169,7 +176,7 @@
         osc.connect(gain).connect(this.ctx.destination);
         osc.start(now);
         osc.stop(now + 0.12);
-        // Metallic click
+        // Click
         const click = this.ctx.createOscillator();
         click.type = "triangle";
         click.frequency.setValueAtTime(1200, now);
@@ -267,6 +274,42 @@
         osc.start(now);
         osc.stop(now + 0.07);
       }
+
+      octocatCatch() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        // Magical rising arpeggio
+        [440, 554, 659, 880, 1108].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          const g = this.ctx.createGain();
+          g.gain.setValueAtTime(0.1, now + i * 0.07);
+          g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.07 + 0.25);
+          osc.connect(g).connect(this.ctx.destination);
+          osc.start(now + i * 0.07);
+          osc.stop(now + i * 0.07 + 0.26);
+        });
+        // Shimmer noise layer
+        const sr = this.ctx.sampleRate;
+        const len = sr * 0.5;
+        const buf = this.ctx.createBuffer(1, len, sr);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) {
+          data[i] = (Math.random() * 2 - 1) * 0.08 * (1 - i / len);
+        }
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = "highpass";
+        hp.frequency.value = 3000;
+        const sg = this.ctx.createGain();
+        sg.gain.setValueAtTime(0.15, now);
+        sg.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+        src.connect(hp).connect(sg).connect(this.ctx.destination);
+        src.start(now);
+        src.stop(now + 0.5);
+      }
     }
 
     const audio = new AudioEngine();
@@ -283,6 +326,8 @@
       bubbles: [],
       particles: [],
       seaweed: [],
+      plankton: [],
+      floorDecorations: [],
       mouths: [],
       hands: [],
       difficultyTier: 0,
@@ -293,6 +338,9 @@
       combo: 0,
       lastCatchTime: 0,
       shakeUntil: 0,
+      frozenUntil: 0,
+      octocat: null,
+      lastOctocatSpawn: 0,
       faceModelReady: false,
       handModelReady: false,
     };
@@ -309,6 +357,7 @@
       W = canvas.width = window.innerWidth;
       H = canvas.height = window.innerHeight;
       initSeaweed();
+      initFloorDecorations();
     }
     resize();
     window.addEventListener("resize", resize);
@@ -544,6 +593,7 @@
         this.size = type.size;
         this.points = type.points;
         this.caught = false;
+        this.caughtTime = 0;
         this.offscreen = false;
 
         const speedMult = Math.pow(CFG.difficultySpeedMult, state.difficultyTier);
@@ -589,6 +639,7 @@
       }
 
       update(dt) {
+        if (this.caught) return;
         this.wanderPhase += dt * 1.2;
         const wander = Math.sin(this.wanderPhase) * this.wanderAmp * dt;
         const moveAngle = this.angle + wander;
@@ -607,6 +658,15 @@
       draw(ctx) {
         ctx.save();
         ctx.translate(this.x, this.y);
+
+        if (this.caught && this.caughtTime) {
+          const elapsed = performance.now() - this.caughtTime;
+          const progress = Math.min(1, elapsed / 400);
+          ctx.globalAlpha = 1 - progress;
+          const sc = 1 - progress;
+          ctx.scale(sc, sc);
+          ctx.translate(0, -progress * 30);
+        }
 
         const dir = this.facingLeft ? -1 : 1;
         ctx.scale(dir, 1);
@@ -968,36 +1028,211 @@
     }
 
     // =========================================================
+    // PLANKTON (ambient particles)
+    // =========================================================
+    function initPlankton() {
+      state.plankton = [];
+      const count = 30 + Math.floor(Math.random() * 11);
+      for (let i = 0; i < count; i++) {
+        state.plankton.push({
+          x: Math.random() * W,
+          y: Math.random() * H,
+          vx: (Math.random() - 0.5) * 0.3,
+          vy: (Math.random() - 0.5) * 0.3,
+          r: 1 + Math.random(),
+          opacity: 0.08 + Math.random() * 0.12,
+          warm: Math.random() > 0.5,
+        });
+      }
+    }
+
+    function updatePlankton() {
+      for (const p of state.plankton) {
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.x < 0) p.x = W;
+        if (p.x > W) p.x = 0;
+        if (p.y < 0) p.y = H;
+        if (p.y > H) p.y = 0;
+      }
+    }
+
+    function drawPlankton() {
+      for (const p of state.plankton) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = p.warm
+          ? `rgba(200, 180, 140, ${p.opacity})`
+          : `rgba(140, 180, 200, ${p.opacity})`;
+        ctx.fill();
+      }
+    }
+
+    // =========================================================
     // SEAWEED (decorative bottom)
     // =========================================================
     function initSeaweed() {
       state.seaweed = [];
       const count = Math.floor(W / 80);
       for (let i = 0; i < count; i++) {
-        state.seaweed.push({
-          x: 40 + i * (W / count) + (Math.random() - 0.5) * 40,
-          h: 40 + Math.random() * 80,
-          phase: Math.random() * Math.PI * 2,
-          speed: 0.8 + Math.random() * 1.2,
-          hue: 100 + Math.random() * 40,
-        });
+        const baseX = 40 + i * (W / count) + (Math.random() - 0.5) * 40;
+        const frondCount = 2 + Math.floor(Math.random() * 3);
+        const fronds = [];
+        for (let f = 0; f < frondCount; f++) {
+          fronds.push({
+            xOff: (Math.random() - 0.5) * 16,
+            h: 40 + Math.random() * 80,
+            phase: Math.random() * Math.PI * 2,
+            speed: 0.8 + Math.random() * 1.2,
+            hue: 100 + Math.random() * 40,
+          });
+        }
+        state.seaweed.push({ x: baseX, fronds });
       }
     }
 
     function drawSeaweed(time) {
-      for (const sw of state.seaweed) {
-        const sway = Math.sin(time * 0.001 * sw.speed + sw.phase) * 15;
-        ctx.strokeStyle = `hsla(${sw.hue}, 60%, 30%, 0.6)`;
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.moveTo(sw.x, H);
-        ctx.quadraticCurveTo(sw.x + sway, H - sw.h * 0.6, sw.x + sway * 0.5, H - sw.h);
-        ctx.stroke();
-        // Leaf
-        ctx.fillStyle = `hsla(${sw.hue}, 50%, 35%, 0.4)`;
-        ctx.beginPath();
-        ctx.ellipse(sw.x + sway * 0.3, H - sw.h * 0.5, 8, 3, sway * 0.02, 0, Math.PI * 2);
-        ctx.fill();
+      for (const cluster of state.seaweed) {
+        for (const fr of cluster.fronds) {
+          const fx = cluster.x + fr.xOff;
+          const sway = Math.sin(time * 0.001 * fr.speed + fr.phase) * 15;
+          ctx.strokeStyle = `hsla(${fr.hue}, 60%, 30%, 0.6)`;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(fx, H);
+          ctx.quadraticCurveTo(fx + sway, H - fr.h * 0.6, fx + sway * 0.5, H - fr.h);
+          ctx.stroke();
+          for (let lf = 0.3; lf <= 0.8; lf += 0.25) {
+            const ly = H - fr.h * lf;
+            const lx = fx + sway * lf * 0.6;
+            const side = ((lf * 10) % 2 < 1) ? 1 : -1;
+            ctx.fillStyle = `hsla(${fr.hue}, 50%, 35%, 0.4)`;
+            ctx.beginPath();
+            ctx.ellipse(lx + side * 6, ly, 8, 3, side * sway * 0.03 + side * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+    }
+
+    // =========================================================
+    // OCEAN FLOOR DECORATIONS
+    // =========================================================
+    function initFloorDecorations() {
+      state.floorDecorations = [];
+      const count = 8 + Math.floor(Math.random() * 6);
+      for (let i = 0; i < count; i++) {
+        const kind = Math.floor(Math.random() * 3);
+        state.floorDecorations.push({
+          x: Math.random() * W,
+          y: H - 10 - Math.random() * 35,
+          kind,
+          size: 5 + Math.random() * 8,
+          rot: Math.random() * Math.PI * 2,
+          hue: kind === 0 ? 30 + Math.random() * 20 : kind === 1 ? 10 + Math.random() * 30 : 270 + Math.random() * 40,
+        });
+      }
+    }
+
+    function drawFloorDecorations() {
+      for (const d of state.floorDecorations) {
+        ctx.save();
+        ctx.translate(d.x, d.y);
+        ctx.rotate(d.rot);
+        if (d.kind === 0) {
+          // Shell
+          ctx.fillStyle = `hsla(${d.hue}, 30%, 50%, 0.3)`;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, d.size, d.size * 0.6, 0, 0, Math.PI);
+          ctx.fill();
+          ctx.strokeStyle = `hsla(${d.hue}, 25%, 40%, 0.25)`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.arc(0, -d.size * 0.1, d.size * 0.4, 0.5, Math.PI * 1.5);
+          ctx.stroke();
+        } else if (d.kind === 1) {
+          // Starfish
+          ctx.fillStyle = `hsla(${d.hue}, 40%, 45%, 0.3)`;
+          ctx.beginPath();
+          for (let a = 0; a < 5; a++) {
+            const angle = a * Math.PI * 2 / 5 - Math.PI / 2;
+            const outerX = Math.cos(angle) * d.size;
+            const outerY = Math.sin(angle) * d.size;
+            const innerAngle = angle + Math.PI / 5;
+            const innerX = Math.cos(innerAngle) * d.size * 0.4;
+            const innerY = Math.sin(innerAngle) * d.size * 0.4;
+            if (a === 0) ctx.moveTo(outerX, outerY);
+            else ctx.lineTo(outerX, outerY);
+            ctx.lineTo(innerX, innerY);
+          }
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          // Sea urchin
+          ctx.fillStyle = `hsla(${d.hue}, 35%, 25%, 0.3)`;
+          ctx.beginPath();
+          ctx.arc(0, 0, d.size * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = `hsla(${d.hue}, 30%, 30%, 0.25)`;
+          ctx.lineWidth = 0.7;
+          for (let sp = 0; sp < 10; sp++) {
+            const angle = sp * Math.PI * 2 / 10;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(angle) * d.size * 0.4, Math.sin(angle) * d.size * 0.4);
+            ctx.lineTo(Math.cos(angle) * d.size, Math.sin(angle) * d.size);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
+    // =========================================================
+    // ESCAPE WARNINGS
+    // =========================================================
+    function drawEscapeWarnings(now) {
+      const pulse = 0.5 + Math.sin(now * 0.008) * 0.5;
+      for (const lob of state.lobsters) {
+        if (lob.caught) continue;
+        const margin = lob.size * 2;
+        const arrowSize = 10;
+        ctx.fillStyle = `rgba(255, 80, 30, ${(0.3 + pulse * 0.5).toFixed(2)})`;
+        if (lob.x < margin && lob.x > -lob.size) {
+          const ay = Math.max(arrowSize, Math.min(H - arrowSize, lob.y));
+          ctx.beginPath();
+          ctx.moveTo(4, ay - arrowSize);
+          ctx.lineTo(4 + arrowSize, ay);
+          ctx.lineTo(4, ay + arrowSize);
+          ctx.closePath();
+          ctx.fill();
+        }
+        if (lob.x > W - margin && lob.x < W + lob.size) {
+          const ay = Math.max(arrowSize, Math.min(H - arrowSize, lob.y));
+          ctx.beginPath();
+          ctx.moveTo(W - 4, ay - arrowSize);
+          ctx.lineTo(W - 4 - arrowSize, ay);
+          ctx.lineTo(W - 4, ay + arrowSize);
+          ctx.closePath();
+          ctx.fill();
+        }
+        if (lob.y < margin && lob.y > -lob.size) {
+          const ax = Math.max(arrowSize, Math.min(W - arrowSize, lob.x));
+          ctx.beginPath();
+          ctx.moveTo(ax - arrowSize, 4);
+          ctx.lineTo(ax, 4 + arrowSize);
+          ctx.lineTo(ax + arrowSize, 4);
+          ctx.closePath();
+          ctx.fill();
+        }
+        if (lob.y > H - margin && lob.y < H + lob.size) {
+          const ax = Math.max(arrowSize, Math.min(W - arrowSize, lob.x));
+          ctx.beginPath();
+          ctx.moveTo(ax - arrowSize, H - 4);
+          ctx.lineTo(ax, H - 4 - arrowSize);
+          ctx.lineTo(ax + arrowSize, H - 4);
+          ctx.closePath();
+          ctx.fill();
+        }
       }
     }
 
@@ -1046,6 +1281,121 @@
     }
 
     // =========================================================
+    // OCTOCAT EASTER EGG
+    // =========================================================
+    function spawnOctocat() {
+      const s = CFG.octocatSize;
+      const edge = Math.floor(Math.random() * 4);
+      let x, y, angle;
+      switch (edge) {
+        case 0: x = -s; y = s + Math.random() * (H - s * 2); angle = -0.3 + Math.random() * 0.6; break;
+        case 1: x = W + s; y = s + Math.random() * (H - s * 2); angle = Math.PI - 0.3 + Math.random() * 0.6; break;
+        case 2: x = s + Math.random() * (W - s * 2); y = -s; angle = Math.PI / 2 - 0.3 + Math.random() * 0.6; break;
+        default: x = s + Math.random() * (W - s * 2); y = H + s; angle = -Math.PI / 2 - 0.3 + Math.random() * 0.6; break;
+      }
+      state.octocat = {
+        x, y, angle, size: s,
+        speed: CFG.octocatSpeed,
+        wanderPhase: Math.random() * Math.PI * 2,
+        tentaclePhase: Math.random() * Math.PI * 2,
+      };
+    }
+
+    function updateOctocat(dt, now) {
+      // Spawn check
+      if (!state.octocat) {
+        const interval = CFG.octocatSpawnMin + Math.random() * (CFG.octocatSpawnMax - CFG.octocatSpawnMin);
+        if (now - state.lastOctocatSpawn > interval && now - state.gameStartTime > 15000) {
+          spawnOctocat();
+          state.lastOctocatSpawn = now;
+        }
+        return;
+      }
+      const o = state.octocat;
+      o.wanderPhase += dt * 0.8;
+      o.tentaclePhase += dt * 3;
+      const wander = Math.sin(o.wanderPhase) * 0.3 * dt;
+      o.x += Math.cos(o.angle + wander) * o.speed;
+      o.y += Math.sin(o.angle + wander) * o.speed;
+      // Despawn when well offscreen
+      const m = o.size * 3;
+      if (o.x < -m || o.x > W + m || o.y < -m || o.y > H + m) {
+        state.octocat = null;
+      }
+    }
+
+    function drawOctocat() {
+      const o = state.octocat;
+      if (!o) return;
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.globalAlpha = 0.35;
+      const s = o.size;
+
+      // Head
+      ctx.fillStyle = "#2d1a4e";
+      ctx.beginPath();
+      ctx.arc(0, -s * 0.1, s * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Ears
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.28, -s * 0.35);
+      ctx.lineTo(-s * 0.15, -s * 0.55);
+      ctx.lineTo(-s * 0.05, -s * 0.35);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(s * 0.28, -s * 0.35);
+      ctx.lineTo(s * 0.15, -s * 0.55);
+      ctx.lineTo(s * 0.05, -s * 0.35);
+      ctx.fill();
+
+      // Eyes
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.ellipse(-s * 0.12, -s * 0.15, s * 0.08, s * 0.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(s * 0.12, -s * 0.15, s * 0.08, s * 0.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#2d1a4e";
+      ctx.beginPath();
+      ctx.arc(-s * 0.1, -s * 0.13, s * 0.04, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(s * 0.1, -s * 0.13, s * 0.04, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Tentacles (5 wavy arms)
+      ctx.strokeStyle = "#2d1a4e";
+      ctx.lineCap = "round";
+      for (let i = 0; i < 5; i++) {
+        const baseAngle = -0.5 + i * 0.25;
+        const sway = Math.sin(o.tentaclePhase + i * 1.2) * 0.15;
+        const tx = Math.sin(baseAngle + sway) * s * 0.25;
+        const ty = s * 0.15;
+        const endX = Math.sin(baseAngle + sway) * s * 0.45;
+        const endY = s * 0.5 + Math.sin(o.tentaclePhase + i * 0.8) * s * 0.06;
+        ctx.lineWidth = s * 0.06 * (1 - i * 0.08);
+        ctx.beginPath();
+        ctx.moveTo(tx * 0.5, ty);
+        ctx.quadraticCurveTo(tx + Math.sin(o.tentaclePhase + i) * s * 0.08, ty + (endY - ty) * 0.5, endX, endY);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    function octocatHitTest(hx, hy, radius) {
+      if (!state.octocat) return false;
+      const o = state.octocat;
+      const dx = hx - o.x;
+      const dy = hy - o.y;
+      const hitR = o.size * 0.4 + radius * 0.3;
+      return dx * dx + dy * dy < hitR * hitR;
+    }
+
+    // =========================================================
     // CATCH LOGIC
     // =========================================================
     function attemptCatch(hx, hy, now, method) {
@@ -1054,6 +1404,29 @@
 
       if (method === "hand") { audio.grab(); } else { audio.splash(); }
       spawnCatchParticles(hx, hy, false, method);
+
+      // Octocat easter egg check (before lobsters)
+      if (octocatHitTest(hx, hy, radius)) {
+        audio.octocatCatch();
+        // Golden particle burst
+        for (let i = 0; i < 25; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 3 + Math.random() * 6;
+          state.particles.push({
+            x: state.octocat.x, y: state.octocat.y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.6 + Math.random() * 0.5,
+            maxLife: 0.6 + Math.random() * 0.5,
+            r: 4 + Math.random() * 6,
+            color: "rgba(255, 215, 0,",
+          });
+        }
+        state.frozenUntil = now + CFG.octocatFreezeDuration;
+        state.catchFlash = { x: state.octocat.x, y: state.octocat.y, time: now, points: 0, combo: 0, method: "octocat" };
+        state.octocat = null;
+        return;
+      }
 
       for (let i = state.lobsters.length - 1; i >= 0; i--) {
         const lob = state.lobsters[i];
@@ -1073,7 +1446,7 @@
 
           audio.catchSuccess();
           spawnCatchParticles(lob.x, lob.y, true, method);
-          state.lobsters.splice(i, 1);
+          lob.caughtTime = now;
           break;
         }
       }
@@ -1112,10 +1485,17 @@
     // =========================================================
     function updateGame(dt, now) {
       updateSpawning(dt, now);
+      updateOctocat(dt, now);
+
+      const frozen = now < state.frozenUntil;
 
       for (let i = state.lobsters.length - 1; i >= 0; i--) {
         const lob = state.lobsters[i];
-        lob.update(dt);
+        if (lob.caught && lob.caughtTime && now - lob.caughtTime > 400) {
+          state.lobsters.splice(i, 1);
+          continue;
+        }
+        if (!frozen) lob.update(dt);
         if (lob.offscreen && !lob.caught) {
           state.lobsters.splice(i, 1);
           state.lives--;
@@ -1126,6 +1506,7 @@
       }
 
       updateBubbles(dt);
+      updatePlankton();
       updateParticles(dt);
     }
 
@@ -1142,10 +1523,14 @@
       state.difficultyTier = 0;
       state.spawnAccum = 0;
       state.catchFlash = null;
+      state.octocat = null;
+      state.lastOctocatSpawn = now;
+      state.frozenUntil = 0;
       state.gameStartTime = now;
       state.lastDifficultyUp = now;
       state.lastCatchTime = 0;
       initBubbles();
+      initPlankton();
     }
 
     function endGame(now) {
@@ -1169,6 +1554,19 @@
       grad.addColorStop(1, "#071e35");
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
+
+      // Water surface wave
+      ctx.fillStyle = "rgba(20, 60, 100, 0.25)";
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      for (let wx = 0; wx <= W; wx += 4) {
+        const wy = 10 + Math.sin(wx * 0.015 + time * 0.002) * 5
+                  + Math.sin(wx * 0.008 - time * 0.0015) * 3;
+        ctx.lineTo(wx, wy);
+      }
+      ctx.lineTo(W, 0);
+      ctx.closePath();
+      ctx.fill();
 
       // Animated caustic light patterns on the ocean floor
       ctx.save();
@@ -1220,6 +1618,14 @@
       }
       ctx.restore();
 
+      // Vignette
+      const vigGrad = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+      vigGrad.addColorStop(0, "rgba(0,0,0,0)");
+      vigGrad.addColorStop(1, "rgba(2,8,20,0.35)");
+      ctx.fillStyle = vigGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      drawFloorDecorations();
       drawSeaweed(time);
     }
 
@@ -1366,6 +1772,8 @@
     }
 
     function drawHUD(now) {
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur = 4;
       ctx.fillStyle = "#e6fff5";
       ctx.font = "bold 28px -apple-system, BlinkMacSystemFont, sans-serif";
       ctx.textAlign = "left";
@@ -1408,6 +1816,15 @@
         ctx.fillText(`${state.combo}x COMBO`, W / 2, 40);
       }
 
+      // Freeze timer
+      if (now < state.frozenUntil) {
+        const remaining = ((state.frozenUntil - now) / 1000).toFixed(1);
+        ctx.textAlign = "center";
+        ctx.font = "bold 20px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillStyle = `rgba(255, 215, 0, ${0.6 + Math.sin(now * 0.01) * 0.3})`;
+        ctx.fillText(`FROZEN ${remaining}s`, W / 2, 68);
+      }
+
       // Catch flash
       if (state.catchFlash && now - state.catchFlash.time < 1000) {
         const t = (now - state.catchFlash.time) / 1000;
@@ -1417,16 +1834,20 @@
         ctx.globalAlpha = alpha;
         ctx.textAlign = "center";
         ctx.font = "bold 32px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillStyle = state.catchFlash.method === "hand" ? "#ffb832" : "#39d353";
-        const label = state.catchFlash.method === "hand" ? "GRAB!" : "CHOMP!";
-        ctx.fillText(`+${state.catchFlash.points} ${label}`, state.catchFlash.x, state.catchFlash.y - yOff);
+        ctx.fillStyle = state.catchFlash.method === "octocat" ? "#ffd700" : state.catchFlash.method === "hand" ? "#ffb832" : "#39d353";
+        const label = state.catchFlash.method === "octocat" ? "GOLDEN FREEZE!" : state.catchFlash.method === "hand" ? "GRAB!" : "CHOMP!";
+        const flashText = state.catchFlash.method === "octocat" ? label : `+${state.catchFlash.points} ${label}`;
+        ctx.fillText(flashText, state.catchFlash.x, state.catchFlash.y - yOff);
         ctx.restore();
       }
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
     }
 
     function drawStartScreen(time) {
       drawOceanBackground(time);
       drawBubbles();
+      drawPlankton();
 
       // Demo lobsters
       ctx.save();
@@ -1447,6 +1868,14 @@
       demo2.clawPhase = demoTime * 2.5;
       demo2.facingLeft = true;
       demo2.draw(ctx);
+
+      const demo3 = new Lobster(2);
+      demo3.x = W * 0.5 + Math.sin(demoTime * 0.4 + 2) * 70;
+      demo3.y = H * 0.7;
+      demo3.legPhase = demoTime * 4;
+      demo3.clawPhase = demoTime * 1.8;
+      demo3.facingLeft = false;
+      demo3.draw(ctx);
       ctx.restore();
 
       // Title
@@ -1509,6 +1938,7 @@
     function drawGameOverScreen(now) {
       drawOceanBackground(now);
       drawBubbles();
+      drawPlankton();
 
       ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
       ctx.fillRect(0, 0, W, H);
@@ -1575,19 +2005,37 @@
 
       if (state.phase === "start") {
         updateBubbles(dt);
+        updatePlankton();
         drawStartScreen(now);
       } else if (state.phase === "playing") {
         updateGame(dt, now);
         drawOceanBackground(now);
         drawCameraFeed();
         drawBubbles();
-        for (const lob of state.lobsters) { lob.draw(ctx); }
+        drawPlankton();
+        const frozen = now < state.frozenUntil;
+        for (const lob of state.lobsters) {
+          lob.draw(ctx);
+          if (frozen && !lob.caught) {
+            // Gold tint overlay
+            ctx.save();
+            ctx.globalAlpha = 0.25 + Math.sin(now * 0.008) * 0.1;
+            ctx.fillStyle = "#ffd700";
+            ctx.beginPath();
+            ctx.ellipse(lob.x, lob.y, lob.size * 0.45, lob.size * 0.25, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+        drawOctocat();
+        drawEscapeWarnings(now);
         drawParticles();
         drawClawIndicators(now);
         drawMouthIndicators(now);
         drawHUD(now);
       } else if (state.phase === "gameover") {
         updateBubbles(dt);
+        updatePlankton();
         updateParticles(dt);
         drawGameOverScreen(now);
       }
@@ -1626,7 +2074,9 @@
     // =========================================================
     async function init() {
       initBubbles();
+      initPlankton();
       initSeaweed();
+      initFloorDecorations();
       await Promise.all([initWebcam(), initMediaPipe()]);
     }
 
