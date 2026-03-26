@@ -133,11 +133,11 @@
       LEADERBOARD_MAX: 50,
       LEADERBOARD_REFRESH: 30000,
 
-      baseLobstersPerSec: 0.35,
-      difficultyInterval: 55000,
-      difficultySpawnMult: 1.07,
-      difficultySpeedMult: 1.04,
-      maxDifficultyTier: 6,
+      baseLobstersPerSec: 0.5,
+      difficultyInterval: 30000,
+      difficultySpawnMult: 1.12,
+      difficultySpeedMult: 1.08,
+      maxDifficultyTier: 8,
 
       lobsterTypes: [
         { name: "baby",
@@ -164,9 +164,30 @@
           legColor: "#601010", spotColor: "rgba(30,0,0,0.1)",
           highlight: "rgba(255,160,140,0.18)", eyeColor: "#ffd700",
           size: 140, speed: [0.5, 1.0], points: 5, weight: 1 },
+        { name: "golden",
+          bodyTop: "#ffd700", bodyMid: "#ffec80", bodyBot: "#fff4cc",
+          clawOuter: "#daa520", clawInner: "#ffe680",
+          segLine: "rgba(180,140,0,0.35)", jointColor: "#fff0a0",
+          tailColor: "#f0c040", tailTip: "#ffe870",
+          legColor: "#daa520", spotColor: "rgba(255,200,0,0.15)",
+          highlight: "rgba(255,255,220,0.4)", eyeColor: "#111",
+          size: 80, speed: [2.0, 3.0], points: 10, weight: 0 },
       ],
 
-      lives: 8,
+      // Wave spawning
+      waveSize: [3, 5],
+      waveDuration: 3000,
+      breatherDuration: 2000,
+      waveGrowth: 0.5,
+
+      // Pufferfish hazard
+      pufferfishChance: 0.12,
+
+      // Frenzy mode
+      frenzyComboThreshold: 5,
+      frenzyDuration: 3000,
+
+      lives: 5,
       mouthOpenThreshold: 0.3,
       catchRadiusMouth: 110,
       catchRadiusHand: 100,
@@ -392,6 +413,76 @@
         src.start(now);
         src.stop(now + 0.5);
       }
+
+      comboSound(combo) {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const freq = 400 + Math.min(combo, 8) * 80;
+        const osc = this.ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0.15, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        osc.connect(g).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.11);
+      }
+
+      pufferfishBuzz() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(120, now);
+        osc.frequency.linearRampToValueAtTime(60, now + 0.3);
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0.4, now);
+        g.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.connect(g).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.3);
+        const osc2 = this.ctx.createOscillator();
+        osc2.type = "square";
+        osc2.frequency.value = 90;
+        const g2 = this.ctx.createGain();
+        g2.gain.setValueAtTime(0.2, now + 0.05);
+        g2.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        osc2.connect(g2).connect(this.ctx.destination);
+        osc2.start(now + 0.05);
+        osc2.stop(now + 0.26);
+      }
+
+      frenzyActivate() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        [220, 277, 330, 440, 554, 660].forEach((freq, i) => {
+          const osc = this.ctx.createOscillator();
+          osc.type = i < 3 ? "sawtooth" : "sine";
+          osc.frequency.value = freq;
+          const g = this.ctx.createGain();
+          g.gain.setValueAtTime(0.08, now + i * 0.04);
+          g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.04 + 0.4);
+          osc.connect(g).connect(this.ctx.destination);
+          osc.start(now + i * 0.04);
+          osc.stop(now + i * 0.04 + 0.41);
+        });
+      }
+
+      waveStart() {
+        if (!this.ready) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.setValueAtTime(400, now + 0.1);
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0.2, now);
+        g.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        osc.connect(g).connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.25);
+      }
     }
 
     const audio = new AudioEngine();
@@ -433,6 +524,19 @@
       playerPhoto: null,
       submittingScore: false,
       scoreSubmitted: false,
+      // Wave system
+      wavePhase: "wave",
+      waveStartTime: 0,
+      waveLobstersLeft: 0,
+      waveNumber: 0,
+      waveSpawnAccum: 0,
+      waveAnnouncedTime: 0,
+      // Frenzy
+      frenzyUntil: 0,
+      frenzyTriggered: false,
+      catchesSinceLastMiss: 0,
+      // Screen juice
+      screenFlash: 0,
     };
 
     // =========================================================
@@ -685,6 +789,8 @@
         this.caught = false;
         this.caughtTime = 0;
         this.offscreen = false;
+        this.isPufferfish = false;
+        this.trailCounter = 0;
 
         const speedMult = Math.pow(CFG.difficultySpeedMult, state.difficultyTier);
         const baseSpeed = type.speed[0] + Math.random() * (type.speed[1] - type.speed[0]);
@@ -746,6 +852,132 @@
       }
 
       draw(ctx) {
+        // Golden lobster sparkle trail
+        if (this.type.name === "golden" && !this.caught) {
+          this.trailCounter = (this.trailCounter || 0) + 1;
+          if (this.trailCounter % 3 === 0) {
+            state.particles.push({
+              x: this.x + (Math.random() - 0.5) * this.size * 0.3,
+              y: this.y + (Math.random() - 0.5) * this.size * 0.3,
+              vx: (Math.random() - 0.5) * 1.5,
+              vy: (Math.random() - 0.5) * 1.5,
+              life: 0.4 + Math.random() * 0.2,
+              maxLife: 0.4 + Math.random() * 0.2,
+              r: 2 + Math.random() * 3,
+              color: "rgba(255, 215, 0,",
+            });
+          }
+        }
+
+        // Pufferfish drawing (early return)
+        if (this.isPufferfish) {
+          ctx.save();
+          ctx.translate(this.x, this.y);
+
+          if (this.caught && this.caughtTime) {
+            const elapsed = performance.now() - this.caughtTime;
+            const progress = Math.min(1, elapsed / 400);
+            ctx.globalAlpha = 1 - progress;
+            const sc = 1 - progress;
+            ctx.scale(sc, sc);
+            ctx.translate(0, -progress * 30);
+          }
+
+          const s = this.size;
+          const now = performance.now();
+          const spikePulse = 1 + Math.sin(now * 0.006) * 0.15;
+
+          // Reddish/purple glow
+          ctx.beginPath();
+          ctx.arc(0, 0, s * 0.55, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(180, 50, 120, 0.12)";
+          ctx.fill();
+
+          // Body (round yellow-green)
+          const bodyGrad = ctx.createRadialGradient(0, -s * 0.05, s * 0.05, 0, 0, s * 0.35);
+          bodyGrad.addColorStop(0, "#d4e860");
+          bodyGrad.addColorStop(0.6, "#a8c030");
+          bodyGrad.addColorStop(1, "#7a9018");
+          ctx.fillStyle = bodyGrad;
+          ctx.beginPath();
+          ctx.arc(0, 0, s * 0.35, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "rgba(60, 80, 0, 0.4)";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          // Spikes (10 triangles radiating out)
+          ctx.fillStyle = "#8a6020";
+          for (let i = 0; i < 10; i++) {
+            const angle = (i / 10) * Math.PI * 2;
+            const spikeLen = s * 0.18 * spikePulse;
+            const baseR = s * 0.32;
+            const bx1 = Math.cos(angle - 0.15) * baseR;
+            const by1 = Math.sin(angle - 0.15) * baseR;
+            const bx2 = Math.cos(angle + 0.15) * baseR;
+            const by2 = Math.sin(angle + 0.15) * baseR;
+            const tx = Math.cos(angle) * (baseR + spikeLen);
+            const ty = Math.sin(angle) * (baseR + spikeLen);
+            ctx.beginPath();
+            ctx.moveTo(bx1, by1);
+            ctx.lineTo(tx, ty);
+            ctx.lineTo(bx2, by2);
+            ctx.closePath();
+            ctx.fill();
+          }
+
+          // Belly spots
+          ctx.fillStyle = "rgba(180, 160, 80, 0.3)";
+          for (let i = 0; i < 5; i++) {
+            const sx = Math.sin(i * 2.5) * s * 0.15;
+            const sy = Math.cos(i * 2.5) * s * 0.12;
+            ctx.beginPath();
+            ctx.arc(sx, sy, s * 0.04, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Eyes (big surprised)
+          ctx.fillStyle = "#fff";
+          ctx.beginPath();
+          ctx.ellipse(-s * 0.12, -s * 0.1, s * 0.09, s * 0.11, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(s * 0.12, -s * 0.1, s * 0.09, s * 0.11, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Pupils
+          ctx.fillStyle = "#111";
+          ctx.beginPath();
+          ctx.arc(-s * 0.1, -s * 0.08, s * 0.04, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(s * 0.1, -s * 0.08, s * 0.04, 0, Math.PI * 2);
+          ctx.fill();
+          // Eye highlights
+          ctx.fillStyle = "rgba(255,255,255,0.6)";
+          ctx.beginPath();
+          ctx.arc(-s * 0.13, -s * 0.12, s * 0.02, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(s * 0.09, -s * 0.12, s * 0.02, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Small mouth (o shape)
+          ctx.strokeStyle = "#555";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(0, s * 0.08, s * 0.04, 0, Math.PI * 2);
+          ctx.stroke();
+
+          // Warning "!" above
+          ctx.fillStyle = "rgba(255, 60, 60, 0.85)";
+          ctx.font = `bold ${Math.floor(s * 0.3)}px sans-serif`;
+          ctx.textAlign = "center";
+          ctx.fillText("!", 0, -s * 0.48);
+
+          ctx.restore();
+          return;
+        }
+
         ctx.save();
         ctx.translate(this.x, this.y);
 
@@ -1525,6 +1757,32 @@
           lob.caught = true;
           caught = true;
 
+          // Pufferfish hazard
+          if (lob.isPufferfish) {
+            state.lives--;
+            state.shakeUntil = now + 400;
+            audio.pufferfishBuzz();
+            // Red/purple particles
+            for (let pi = 0; pi < 20; pi++) {
+              const angle = Math.random() * Math.PI * 2;
+              const speed = 2 + Math.random() * 5;
+              state.particles.push({
+                x: lob.x, y: lob.y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                life: 0.5 + Math.random() * 0.3,
+                maxLife: 0.5 + Math.random() * 0.3,
+                r: 3 + Math.random() * 5,
+                color: Math.random() > 0.5 ? "rgba(255, 50, 50," : "rgba(160, 50, 200,",
+              });
+            }
+            state.catchFlash = { x: lob.x, y: lob.y, time: now, points: 0, combo: 0, method: "pufferfish" };
+            state.catchesSinceLastMiss = 0;
+            lob.caughtTime = now;
+            if (state.lives <= 0) { endGame(now); return; }
+            break;
+          }
+
           if (now - state.lastCatchTime < 2000) { state.combo++; } else { state.combo = 1; }
           state.lastCatchTime = now;
 
@@ -1534,14 +1792,25 @@
 
           state.catchFlash = { x: lob.x, y: lob.y, time: now, points: pts, combo: state.combo, method };
 
-          audio.catchSuccess();
+          audio.comboSound(state.combo);
           spawnCatchParticles(lob.x, lob.y, true, method);
           lob.caughtTime = now;
+          state.screenFlash = now;
+          state.catchesSinceLastMiss++;
+
+          // Frenzy trigger
+          if (state.catchesSinceLastMiss >= CFG.frenzyComboThreshold && now > state.frenzyUntil) {
+            state.frenzyUntil = now + CFG.frenzyDuration;
+            state.frenzyTriggered = true;
+            audio.frenzyActivate();
+            state.catchFlash = { x: lob.x, y: lob.y, time: now, points: pts, combo: state.combo, method: "frenzy" };
+          }
+
           break;
         }
       }
 
-      if (!caught) { audio.pop(); }
+      if (!caught) { audio.pop(); state.catchesSinceLastMiss = 0; }
     }
 
     // =========================================================
@@ -1563,11 +1832,57 @@
         state.lastDifficultyUp = now;
         state.depthUpTime = now;
       }
-      const spawnRate = CFG.baseLobstersPerSec * Math.pow(CFG.difficultySpawnMult, state.difficultyTier);
-      state.spawnAccum += dt * spawnRate;
-      while (state.spawnAccum >= 1) {
-        state.spawnAccum -= 1;
-        state.lobsters.push(new Lobster(pickLobsterType()));
+
+      if (state.wavePhase === "breather") {
+        if (now - state.waveStartTime > CFG.breatherDuration) {
+          // Start new wave
+          state.wavePhase = "wave";
+          state.waveNumber++;
+          state.waveStartTime = now;
+          state.waveSpawnAccum = 0;
+          const minSize = CFG.waveSize[0];
+          const maxSize = CFG.waveSize[1] + Math.floor(state.difficultyTier * CFG.waveGrowth);
+          state.waveLobstersLeft = minSize + Math.floor(Math.random() * (maxSize - minSize + 1));
+          state.waveAnnouncedTime = now;
+          audio.waveStart();
+          // Spawn golden lobster every 3rd wave
+          if (state.waveNumber % 3 === 0) {
+            state.lobsters.push(new Lobster(3));
+          }
+          // Pufferfish chance
+          if (Math.random() < CFG.pufferfishChance) {
+            const pf = new Lobster(0);
+            pf.isPufferfish = true;
+            pf.points = -1;
+            pf.size = 70;
+            state.lobsters.push(pf);
+          }
+        } else {
+          // Straggler during breather (30% chance, checked once per second roughly)
+          state.waveSpawnAccum += dt;
+          if (state.waveSpawnAccum >= 1) {
+            state.waveSpawnAccum -= 1;
+            if (Math.random() < 0.3) {
+              state.lobsters.push(new Lobster(pickLobsterType()));
+            }
+          }
+        }
+      } else {
+        // Wave phase: spawn waveLobstersLeft over waveDuration
+        if (state.waveLobstersLeft > 0) {
+          const spawnRate = state.waveLobstersLeft / (CFG.waveDuration / 1000);
+          state.waveSpawnAccum += dt * spawnRate;
+          while (state.waveSpawnAccum >= 1 && state.waveLobstersLeft > 0) {
+            state.waveSpawnAccum -= 1;
+            state.waveLobstersLeft--;
+            state.lobsters.push(new Lobster(pickLobsterType()));
+          }
+        }
+        if (state.waveLobstersLeft <= 0 && now - state.waveStartTime >= CFG.waveDuration) {
+          state.wavePhase = "breather";
+          state.waveStartTime = now;
+          state.waveSpawnAccum = 0;
+        }
       }
     }
 
@@ -1579,6 +1894,7 @@
       updateOctocat(dt, now);
 
       const frozen = now < state.frozenUntil;
+      const inFrenzy = now < state.frenzyUntil;
 
       for (let i = state.lobsters.length - 1; i >= 0; i--) {
         const lob = state.lobsters[i];
@@ -1586,7 +1902,9 @@
           state.lobsters.splice(i, 1);
           continue;
         }
-        if (!frozen) lob.update(dt);
+        if (!frozen) {
+          lob.update(inFrenzy ? dt * 0.4 : dt);
+        }
         if (lob.offscreen && !lob.caught) {
           state.lobsters.splice(i, 1);
           state.lives--;
@@ -1626,6 +1944,21 @@
       state.scoreSubmitted = false;
       state.playerPhoto = null;
       state.submittingScore = false;
+      // Wave system reset
+      state.wavePhase = "wave";
+      state.waveStartTime = now;
+      state.waveSpawnAccum = 0;
+      state.waveNumber = 1;
+      state.waveAnnouncedTime = now;
+      const minSize = CFG.waveSize[0];
+      const maxSize = CFG.waveSize[1];
+      state.waveLobstersLeft = minSize + Math.floor(Math.random() * (maxSize - minSize + 1));
+      // Frenzy reset
+      state.frenzyUntil = 0;
+      state.frenzyTriggered = false;
+      state.catchesSinceLastMiss = 0;
+      // Screen juice reset
+      state.screenFlash = 0;
       initBubbles();
       initPlankton();
       if (performance.now() - state.lastLeaderboardFetch > CFG.LEADERBOARD_REFRESH) {
@@ -2151,11 +2484,21 @@
         ctx.save();
         ctx.globalAlpha = alpha;
         ctx.textAlign = "center";
-        ctx.font = "bold 32px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillStyle = state.catchFlash.method === "octocat" ? "#ffd700" : state.catchFlash.method === "hand" ? "#ffb832" : "#39d353";
-        const label = state.catchFlash.method === "octocat" ? "GOLDEN FREEZE!" : state.catchFlash.method === "hand" ? "GRAB!" : "CHOMP!";
-        const flashText = state.catchFlash.method === "octocat" ? label : `+${state.catchFlash.points} ${label}`;
-        ctx.fillText(flashText, state.catchFlash.x, state.catchFlash.y - yOff);
+        const fontSize = 28 + Math.min(state.catchFlash.combo, 5) * 4;
+        ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        if (state.catchFlash.method === "pufferfish") {
+          ctx.fillStyle = "#ff3333";
+          ctx.fillText("-1 LIFE! PUFFERFISH!", state.catchFlash.x, state.catchFlash.y - yOff);
+        } else if (state.catchFlash.method === "frenzy") {
+          ctx.fillStyle = "#dd33ff";
+          ctx.font = `bold 42px -apple-system, BlinkMacSystemFont, sans-serif`;
+          ctx.fillText("FRENZY!", state.catchFlash.x, state.catchFlash.y - yOff);
+        } else {
+          ctx.fillStyle = state.catchFlash.method === "octocat" ? "#ffd700" : state.catchFlash.method === "hand" ? "#ffb832" : "#39d353";
+          const label = state.catchFlash.method === "octocat" ? "GOLDEN FREEZE!" : state.catchFlash.method === "hand" ? "GRAB!" : "CHOMP!";
+          const flashText = state.catchFlash.method === "octocat" ? label : `+${state.catchFlash.points} ${label}`;
+          ctx.fillText(flashText, state.catchFlash.x, state.catchFlash.y - yOff);
+        }
         ctx.restore();
       }
 
@@ -2174,6 +2517,46 @@
         ctx.shadowBlur = 12;
         ctx.fillStyle = "#4ac8ff";
         ctx.fillText(`DEPTH ${state.difficultyTier + 1}`, W / 2, H * 0.15);
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+
+      // Wave announcement
+      if (state.waveAnnouncedTime && now - state.waveAnnouncedTime < 2000) {
+        const waveElapsed = now - state.waveAnnouncedTime;
+        let waveAlpha;
+        if (waveElapsed < 300) waveAlpha = waveElapsed / 300;
+        else if (waveElapsed < 1500) waveAlpha = 1;
+        else waveAlpha = 1 - (waveElapsed - 1500) / 500;
+        const waveScale = waveElapsed < 300 ? Math.min(1, waveElapsed / 300) : 1;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, waveAlpha);
+        ctx.translate(W / 2, H * 0.25);
+        ctx.scale(waveScale, waveScale);
+        ctx.textAlign = "center";
+        ctx.font = "bold 44px -apple-system, BlinkMacSystemFont, sans-serif";
+        const waveHue = (state.waveNumber * 35) % 360;
+        ctx.shadowColor = `hsla(${waveHue}, 80%, 60%, 0.5)`;
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = `hsl(${waveHue}, 80%, 65%)`;
+        ctx.fillText(`WAVE ${state.waveNumber}`, 0, 0);
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+
+      // Frenzy HUD
+      if (now < state.frenzyUntil) {
+        const frenzyPulse = 0.7 + Math.sin(now * 0.01) * 0.3;
+        ctx.save();
+        ctx.globalAlpha = frenzyPulse;
+        ctx.textAlign = "center";
+        ctx.font = "bold 28px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.shadowColor = "rgba(200, 50, 255, 0.6)";
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = "#dd33ff";
+        ctx.fillText("FRENZY", W / 2, 96);
         ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
         ctx.restore();
@@ -2305,7 +2688,7 @@
       ctx.fillStyle = "#8b9e94";
       ctx.font = "15px -apple-system, BlinkMacSystemFont, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("Don't let them escape! You have 8 lives.", W / 2, cardY + cardH + 32);
+      ctx.fillText("Don't let them escape! You have 5 lives.", W / 2, cardY + cardH + 32);
 
       // Start prompt
       const pulse = 0.7 + Math.sin(demoTime * 3) * 0.3;
@@ -2627,8 +3010,40 @@
         drawCameraFeed();
         drawBubbles();
         drawPlankton();
+
+        // Camera zoom pulse on big combos
+        const zoomActive = state.catchFlash && state.combo >= 3 && now - state.catchFlash.time < 200;
+        const zoom = zoomActive ? 1 + 0.02 * Math.min(state.combo, 5) : 1;
+        if (zoom !== 1) {
+          ctx.translate(W / 2, H / 2);
+          ctx.scale(zoom, zoom);
+          ctx.translate(-W / 2, -H / 2);
+        }
+
         const frozen = now < state.frozenUntil;
+        const inFrenzy = now < state.frenzyUntil;
+
+        // Frenzy vignette overlay
+        if (inFrenzy) {
+          ctx.save();
+          const fVig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.25, W / 2, H / 2, Math.max(W, H) * 0.65);
+          fVig.addColorStop(0, "rgba(200, 50, 255, 0)");
+          fVig.addColorStop(1, "rgba(200, 50, 255, 0.08)");
+          ctx.fillStyle = fVig;
+          ctx.fillRect(0, 0, W, H);
+          ctx.restore();
+        }
+
         for (const lob of state.lobsters) {
+          // Frenzy glow ring behind each lobster
+          if (inFrenzy && !lob.caught) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(lob.x, lob.y, lob.size * 0.6, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(200, 50, 255, 0.15)";
+            ctx.fill();
+            ctx.restore();
+          }
           lob.draw(ctx);
           if (frozen && !lob.caught) {
             // Gold tint overlay
@@ -2640,6 +3055,20 @@
             ctx.fill();
             ctx.restore();
           }
+          // Lobster bubble wake trails
+          if (!lob.caught && Math.random() < 0.2) {
+            const tailOffX = lob.facingLeft ? lob.size * 0.4 : -lob.size * 0.4;
+            state.particles.push({
+              x: lob.x + tailOffX + (Math.random() - 0.5) * 10,
+              y: lob.y + (Math.random() - 0.5) * 10,
+              vx: (Math.random() - 0.5) * 0.5,
+              vy: -0.3 - Math.random() * 0.5,
+              life: 0.3,
+              maxLife: 0.3,
+              r: 1 + Math.random(),
+              color: "rgba(140, 200, 255,",
+            });
+          }
         }
         drawOctocat();
         drawEscapeWarnings(now);
@@ -2647,6 +3076,13 @@
         drawClawIndicators(now);
         drawMouthIndicators(now);
         drawHUD(now);
+
+        // Screen flash on catch
+        if (state.screenFlash && now - state.screenFlash < 100) {
+          const flashAlpha = 0.15 * (1 - (now - state.screenFlash) / 100);
+          ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
       } else if (state.phase === "gameover") {
         updateBubbles(dt);
         updatePlankton();
