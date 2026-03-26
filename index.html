@@ -3077,12 +3077,7 @@
         drawMouthIndicators(now);
         drawHUD(now);
 
-        // Screen flash on catch
-        if (state.screenFlash && now - state.screenFlash < 100) {
-          const flashAlpha = 0.15 * (1 - (now - state.screenFlash) / 100);
-          ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
-          ctx.fillRect(0, 0, W, H);
-        }
+
       } else if (state.phase === "gameover") {
         updateBubbles(dt);
         updatePlankton();
